@@ -276,7 +276,7 @@ fn decode_image(bytes: &[u8], remaining: usize) -> Option<Pixels> {
     if !(1..=2048).contains(&width) || !(1..=2048).contains(&height) || bgra.len() > remaining {
         return None;
     }
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         for component in &mut pixel[..3] {
             *component = ((u16::from(*component) * alpha + 127) / 255) as u8;
@@ -322,7 +322,7 @@ fn decode_svg(bytes: &[u8], remaining: usize) -> Option<Pixels> {
         &mut pixmap.as_mut(),
     );
     let mut bgra = pixmap.take();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Some(Pixels {

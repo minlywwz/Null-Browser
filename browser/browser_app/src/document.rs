@@ -277,11 +277,15 @@ pub fn sample_image() -> Result<Image, String> {
     let pixels = &pixels[..output.buffer_size()];
     let bgra = match output.color_type {
         png::ColorType::Rgb => pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|rgb| [rgb[2], rgb[1], rgb[0], 255])
             .collect(),
         png::ColorType::Rgba => pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|rgba| {
                 let mul =
                     |component| ((u16::from(component) * u16::from(rgba[3]) + 127) / 255) as u8;
