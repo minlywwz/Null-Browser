@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<title>Rendering sample</title>
+<style>
+body { margin: 0; background: #0b111a; color: #e9eef7; font-size: 17px; }
+main { max-width: 890px; margin: 0 auto; padding: 44px 34px 54px; }
+h1 { font-size: 43px; margin: 6px 0 14px; }
+h2 { font-size: 25px; margin: 0 0 12px; }
+p { margin: 0 0 14px; }
+.eyebrow { color: #7de8d5; font-size: 13px; font-weight: 700; }
+.muted { color: #a7b9cd; }
+.card { background: #131e2c; border-radius: 14px; padding: 23px; margin: 20px 0; }
+.card img { max-width: 100%; height: auto; }
+.action { display: block; width: 205px; padding: 8px 12px; margin: 14px 0 0; background: #24564e; color: #e5fff6; border-radius: 9px; font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">EXAMPLE  /  RENDERING</p>
+  <h1>Rendering sample</h1>
+  <p class="muted">A local page with text shaping, a bundled PNG, and an in-page link. Try <a href="#type">jumping to the typography sample</a>.</p>
+  <figure class="card" id="image">
+    <img src="rendering.png" width="850" alt="A layered field of teal and violet waves">
+    <figcaption><p class="muted">PNG decoded into pixels and drawn as a resource in the Display List.</p></figcaption>
+  </figure>
+  <section class="card" id="type">
+    <h2>Typography</h2>
+    <p>Пример текста на кириллице. Этот абзац переносится при изменении ширины окна.</p>
+    <p class="muted">Paragraphs wrap at the viewport width. The same text layout supplies glyph positions and link hit regions.</p>
+    <a class="action" href="index.html">← Back to Start</a>
+  </section>
+</main>
+</body>
+</html>

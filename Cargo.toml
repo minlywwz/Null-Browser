@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "browser/browser_app",
+    "browser/browser_core",
+    "components/browser_studio",
+    "content/web_engine",
+    "content/web_content_process",
+    "gpu/display_list",
+    "gpu/rendering_ffi",
+    "net",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+
+[workspace.dependencies]
+browser_core = { path = "browser/browser_core" }
+browser_studio = { path = "components/browser_studio" }
+display_list = { path = "gpu/display_list" }
+network_stack = { path = "net" }
+rendering_ffi = { path = "gpu/rendering_ffi" }
+web_engine = { path = "content/web_engine" }
+web_content_process = { path = "content/web_content_process" }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"

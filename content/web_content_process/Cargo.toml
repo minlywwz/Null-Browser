@@ -1,0 +1,18 @@
+[package]
+name = "web_content_process"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64 = "0.22"
+bincode = { version = "2.0.1", features = ["serde"] }
+display_list.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+resvg = { version = "0.50", default-features = false }
+serde.workspace = true
+web_engine.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }

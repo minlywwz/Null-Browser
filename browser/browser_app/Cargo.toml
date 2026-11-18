@@ -1,0 +1,30 @@
+[package]
+name = "browser_app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+browser_core.workspace = true
+display_list.workspace = true
+network_stack.workspace = true
+rendering_ffi.workspace = true
+web_engine.workspace = true
+web_content_process.workspace = true
+png = "0.18"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Isolation",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

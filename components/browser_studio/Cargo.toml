@@ -1,0 +1,7 @@
+[package]
+name = "browser_studio"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/browser_studio.rs"

@@ -1,0 +1,22 @@
+name: Windows
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check Rust
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test engine and offscreen D3D11
+        run: cargo test --locked --workspace
+      - name: Build browser
+        run: cargo build --locked --workspace --release

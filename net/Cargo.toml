@@ -1,0 +1,10 @@
+[package]
+name = "network_stack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls", "gzip", "brotli", "deflate"] }
+tokio = { version = "1", features = ["net"] }
+url = "2.5"

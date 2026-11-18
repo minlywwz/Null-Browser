@@ -1,0 +1,10 @@
+[package]
+name = "rendering_ffi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+display_list.workspace = true
+
+[build-dependencies]
+cc = "1.5"

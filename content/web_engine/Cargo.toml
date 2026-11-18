@@ -1,0 +1,9 @@
+[package]
+name = "web_engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+display_list.workspace = true
+rquickjs = "0.14.0"
+serde.workspace = true

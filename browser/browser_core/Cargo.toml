@@ -1,0 +1,9 @@
+[package]
+name = "browser_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+browser_studio.workspace = true
+network_stack.workspace = true
+web_engine.workspace = true
