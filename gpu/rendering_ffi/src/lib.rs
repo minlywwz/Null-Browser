@@ -168,6 +168,22 @@ unsafe extern "C" {
     ) -> i32;
     fn browser_text_layout_hits(layout: *const c_void, count: *mut u32) -> *const HitRegion;
     fn browser_text_layout_destroy(layout: *mut c_void);
+    fn browser_media_player_create(
+        renderer: *mut c_void,
+        source_url: *const u16,
+        result: *mut *mut c_void,
+    ) -> i32;
+    fn browser_media_player_play(player: *mut c_void) -> i32;
+    fn browser_media_player_pause(player: *mut c_void) -> i32;
+    fn browser_media_player_get_state(
+        player: *mut c_void,
+        is_playing: *mut u32,
+        position_secs: *mut f32,
+        duration_secs: *mut f32,
+    ) -> i32;
+    fn browser_media_player_seek(player: *mut c_void, position_secs: f32) -> i32;
+    fn browser_media_player_get_id(player: *const c_void) -> u32;
+    fn browser_media_player_destroy(player: *mut c_void);
 }
 
 fn check(status: i32, operation: &str) -> Result<(), String> {
@@ -436,6 +452,13 @@ impl PreparedScene {
                     kind: 3,
                     resource: image,
                 },
+                Command::Video { rect, player } => DrawCommand {
+                    rect,
+                    color: Color::TRANSPARENT,
+                    radius: 0.0,
+                    kind: 6,
+                    resource: player,
+                },
             })
             .collect();
         Self {
@@ -480,6 +503,79 @@ pub struct Layer<'a> {
     pub offset_y: f32,
     pub opacity: f32,
     pub fill_background: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MediaPlayerState {
+    pub is_playing: bool,
+    pub position_secs: f32,
+    pub duration_secs: f32,
+}
+
+pub struct MediaPlayer {
+    ptr: NonNull<c_void>,
+    id: u32,
+}
+
+unsafe impl Send for MediaPlayer {}
+
+impl MediaPlayer {
+    pub fn new(renderer: &mut Renderer, url: &str) -> Result<Self, String> {
+        renderer.create_media_player(url)
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn play(&self) -> Result<(), String> {
+        check(
+            unsafe { browser_media_player_play(self.ptr.as_ptr()) },
+            "MediaPlayer play",
+        )
+    }
+
+    pub fn pause(&self) -> Result<(), String> {
+        check(
+            unsafe { browser_media_player_pause(self.ptr.as_ptr()) },
+            "MediaPlayer pause",
+        )
+    }
+
+    pub fn seek(&self, position_secs: f32) -> Result<(), String> {
+        check(
+            unsafe { browser_media_player_seek(self.ptr.as_ptr(), position_secs) },
+            "MediaPlayer seek",
+        )
+    }
+
+    pub fn state(&self) -> Result<MediaPlayerState, String> {
+        let mut is_playing = 0u32;
+        let mut position_secs = 0.0f32;
+        let mut duration_secs = 0.0f32;
+        check(
+            unsafe {
+                browser_media_player_get_state(
+                    self.ptr.as_ptr(),
+                    &mut is_playing,
+                    &mut position_secs,
+                    &mut duration_secs,
+                )
+            },
+            "MediaPlayer get_state",
+        )?;
+        Ok(MediaPlayerState {
+            is_playing: is_playing != 0,
+            position_secs,
+            duration_secs,
+        })
+    }
+}
+
+impl Drop for MediaPlayer {
+    fn drop(&mut self) {
+        unsafe { browser_media_player_destroy(self.ptr.as_ptr()) };
+    }
 }
 
 pub struct Renderer(NonNull<c_void>);
@@ -592,6 +688,20 @@ impl Renderer {
             "Read pixel",
         )?;
         Ok(pixel)
+    }
+
+    pub fn create_media_player(&mut self, url: &str) -> Result<MediaPlayer, String> {
+        let url_u16: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut player = ptr::null_mut();
+        check(
+            unsafe {
+                browser_media_player_create(self.0.as_ptr(), url_u16.as_ptr(), &mut player)
+            },
+            "Create MediaPlayer",
+        )?;
+        let ptr = NonNull::new(player).ok_or("Rendering Engine returned no media player.")?;
+        let id = unsafe { browser_media_player_get_id(ptr.as_ptr()) };
+        Ok(MediaPlayer { ptr, id })
     }
 }
 
@@ -736,5 +846,92 @@ mod tests {
             .unwrap();
         assert!(metrics.width > 0.0);
         assert!(metrics.height > 0.0);
+    }
+
+    #[test]
+    fn draws_video_command_on_warp_renderer() {
+        let mut renderer = Renderer::offscreen(64, 64).unwrap();
+        assert!(renderer.uses_warp());
+
+        let player = renderer.create_media_player("mock://video").unwrap();
+        assert_eq!(player.id(), 0);
+
+        let state = player.state().unwrap();
+        assert!(!state.is_playing);
+        assert_eq!(state.position_secs, 0.0);
+        assert!(state.duration_secs > 0.0);
+
+        player.play().unwrap();
+        let state_playing = player.state().unwrap();
+        assert!(state_playing.is_playing);
+
+        player.seek(2.0).unwrap();
+        let state_seek = player.state().unwrap();
+        assert_eq!(state_seek.position_secs, 2.0);
+
+        player.pause().unwrap();
+        let state_paused = player.state().unwrap();
+        assert!(!state_paused.is_playing);
+
+        let factory = TextFactory::new().unwrap();
+        let scene = factory.batch().prepare(
+            10,
+            DisplayList {
+                background: Color::rgb(0),
+                commands: vec![Command::Video {
+                    rect: Rect::new(4.0, 4.0, 40.0, 40.0),
+                    player: player.id(),
+                }],
+            },
+            Vec::new(),
+        );
+
+        let frame = renderer
+            .draw(
+                &[Layer {
+                    scene: &scene,
+                    clip: Rect::new(0.0, 0.0, 64.0, 64.0),
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    opacity: 1.0,
+                    fill_background: true,
+                }],
+                Color::rgb(0),
+                None,
+            )
+            .unwrap();
+        assert!(frame.presented);
+
+        let pixel = renderer.read_pixel(10, 10).unwrap();
+        assert_ne!(pixel & 0x00ff_ffff, 0);
+
+        let scene_placeholder = factory.batch().prepare(
+            11,
+            DisplayList {
+                background: Color::rgb(0),
+                commands: vec![Command::Video {
+                    rect: Rect::new(4.0, 4.0, 40.0, 40.0),
+                    player: 999,
+                }],
+            },
+            Vec::new(),
+        );
+        let frame_ph = renderer
+            .draw(
+                &[Layer {
+                    scene: &scene_placeholder,
+                    clip: Rect::new(0.0, 0.0, 64.0, 64.0),
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    opacity: 1.0,
+                    fill_background: true,
+                }],
+                Color::rgb(0),
+                None,
+            )
+            .unwrap();
+        assert!(frame_ph.presented);
+        let ph_pixel = renderer.read_pixel(6, 6).unwrap() & 0x00ff_ffff;
+        assert_eq!(ph_pixel, 0x101418);
     }
 }

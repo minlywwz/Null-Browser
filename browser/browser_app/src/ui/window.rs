@@ -334,6 +334,7 @@ struct App {
     error: Option<String>,
     focused_input: Option<(u32, String)>,
     input_values: std::collections::HashMap<u32, String>,
+    media_playing: std::collections::HashSet<u32>,
 }
 
 impl App {
@@ -1171,6 +1172,15 @@ impl App {
                         Some(ControlAction::Click(id)) => {
                             self.activate_control(id);
                         }
+                        Some(ControlAction::MediaToggle(id)) => {
+                            if self.media_playing.contains(&id) {
+                                self.media_playing.remove(&id);
+                            } else {
+                                self.media_playing.insert(id);
+                            }
+                            self.request_layout();
+                            self.update(None);
+                        }
                         None => {
                             if self.focused_input.is_some() {
                                 self.focused_input = None;
@@ -1480,6 +1490,7 @@ pub fn run(options: Options, log: Log) -> Result<(), String> {
         error: None,
         focused_input: None,
         input_values: std::collections::HashMap::new(),
+        media_playing: std::collections::HashSet::new(),
     };
     if let Some(path) = options.file {
         app.open(Location::File(path));

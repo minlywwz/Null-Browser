@@ -95,6 +95,10 @@ pub enum Command {
         rect: Rect,
         image: u32,
     },
+    Video {
+        rect: Rect,
+        player: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

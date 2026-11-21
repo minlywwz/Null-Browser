@@ -4,12 +4,12 @@
   <img src="https://img.shields.io/badge/Platform-Windows%2011%20x64-0078d4?style=for-the-badge&logo=windows11&logoColor=white" alt="Platform" />
   <img src="https://img.shields.io/badge/Rust-2024%20Edition-black?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/C%2B%2B-20%20%2F%20Direct3D%2011-00599c?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++" />
-  <img src="https://img.shields.io/badge/Tests-63%20passed-2ea44f?style=for-the-badge" alt="Tests" />
-  <img src="https://img.shields.io/badge/Code-16.2k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
+  <img src="https://img.shields.io/badge/Tests-66%20passed-2ea44f?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/Code-17.3k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
 </p>
 
-An independent, lightweight web browser engine built from scratch for Windows 11 x64 in Rust and C++ (Direct3D 11, Direct2D, DirectWrite). It does not use Chromium, Gecko, WebKit, or WebView.
+An independent, lightweight web browser engine built from scratch for Windows 11 x64 in Rust and C++ (Direct3D 11, Direct2D, DirectWrite, Windows Media Foundation). It does not use Chromium, Gecko, WebKit, or WebView.
 
 ---
 
@@ -17,20 +17,21 @@ An independent, lightweight web browser engine built from scratch for Windows 11
 
 | Layer / Crate | Purpose | Files | Lines of Code |
 |---|---|:---:|:---:|
-| **`content`** | HTML5/CSS parser, DOM, Layout Engine, QuickJS runtime, AppContainer worker | 11 | **8,621** |
-| **`browser`** | Win32 host, multi-tab strip, navigation history, compositor worker | 13 | **5,255** |
-| **`gpu`** | D3D11 compositor, Motion Engine, DirectWrite text factory, Display List | 9 | **1,907** |
+| **`content`** | HTML5/CSS parser, DOM, Layout Engine, QuickJS runtime, AppContainer worker | 11 | **8,907** |
+| **`browser`** | Win32 host, multi-tab strip, navigation history, compositor worker | 13 | **5,267** |
+| **`gpu`** | D3D11 compositor, Motion Engine, Media Foundation player, DirectWrite text | 11 | **2,648** |
 | **`net`** | HTTP(S) stack, TLS validation, SSRF protection, resource limiters | 1 | **385** |
 | **`components`** | Browser Studio configuration model and settings persistence | 1 | **90** |
-| **Total** | | **35** | **~16,258 LOC** |
+| **Total** | | **37** | **~17,297 LOC** |
 
-* Language composition: **94.2% Rust**, **5.8% C++ / Direct3D 11**.
+* Language composition: **90.8% Rust**, **9.2% C++ / Direct3D 11 / Media Foundation**.
 
 ---
 
 ### Key Capabilities
 
 * **Multi-Tab Interface**: Tab strip with adaptive width, tab lifecycle, per-tab history, scroll preservation, and shortcuts (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab`, `Ctrl+1..9`).
+* **HTML5 Audio & Video**: Native playback for `<video>` and `<audio>` powered by Windows Media Foundation (`IMFSourceReader`) with direct D3D11 frame presentation, interactive play/pause controls overlay, and timeline scrubbing.
 * **Interactive Forms**: `<form>`, `<input>` (text, search, password, submit, checkbox, radio), `<button>`, and `<textarea>`. Supports typing with Win32 `WM_CHAR`, focus outline, text caret, and query string submission.
 * **Modern Web APIs**: JavaScript QuickJS engine with `fetch()` (Promises, `json()`, `text()`), `localStorage`, `sessionStorage`, and `console.log`.
 * **Web Typography**: `@font-face` rule parsing, dynamic font resource downloading, and Windows DirectWrite in-memory font registration via `AddFontMemResourceEx`.

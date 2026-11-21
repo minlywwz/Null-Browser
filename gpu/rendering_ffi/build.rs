@@ -16,8 +16,19 @@ fn main() {
         .file(native.join("src/renderer.cpp"))
         .file(native.join("src/text.cpp"))
         .file(native.join("src/motion_engine/motion_engine.cpp"))
+        .file(native.join("src/media_player.cpp"))
         .compile("rendering_engine");
-    for library in ["d3d11", "dxgi", "d2d1", "dwrite", "gdi32"] {
+    for library in [
+        "d3d11",
+        "dxgi",
+        "d2d1",
+        "dwrite",
+        "gdi32",
+        "ole32",
+        "mfplat",
+        "mfuuid",
+        "mfreadwrite",
+    ] {
         println!("cargo:rustc-link-lib={library}");
     }
 }

@@ -139,7 +139,7 @@ fn painted_height(commands: &[Command]) -> f32 {
                 clips.pop();
                 continue;
             }
-            Command::Fill { rect, .. } | Command::Image { rect, .. } => rect,
+            Command::Fill { rect, .. } | Command::Image { rect, .. } | Command::Video { rect, .. } => rect,
             Command::Text { bounds, .. } => bounds,
         };
         let visible = match clips.last() {
@@ -333,6 +333,8 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             let node = &self.document.nodes[*child];
             let display = self.styles[*child].display;
             let has_block_content = node.name() == "img"
+                || node.name() == "video"
+                || node.name() == "audio"
                 || style.display == Display::Flex && matches!(&node.kind, Kind::Element { .. })
                 || node
                     .children
@@ -499,6 +501,18 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                             height * image.width as f32 / image.height as f32
                         })
                     })
+                    + padding
+                    + border
+            } else if node.name() == "video" {
+                node.attr("width")
+                    .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    .unwrap_or(320.0)
+                    + padding
+                    + border
+            } else if node.name() == "audio" {
+                node.attr("width")
+                    .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    .unwrap_or(300.0)
                     + padding
                     + border
             } else {
@@ -709,6 +723,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             match command {
                 Command::Fill { rect, .. }
                 | Command::Image { rect, .. }
+                | Command::Video { rect, .. }
                 | Command::PushClip { rect } => rect.y += dy,
                 Command::Text { bounds, .. } => bounds.y += dy,
                 Command::PopClip => {}
@@ -963,6 +978,141 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 self.flush(&mut alternative, style, content_x, content_y, width)?
             };
             (height, None, false)
+        } else if node.name() == "video" {
+            let width = if style.width != Length::Auto {
+                width
+            } else if let Some(w) = node
+                .attr("width")
+                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+            {
+                w
+            } else {
+                320.0
+            };
+            let height = specified_height
+                .or_else(|| {
+                    node.attr("height")
+                        .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                })
+                .unwrap_or(180.0);
+            let rect = Rect::new(content_x, content_y, width, height);
+            if style.visible {
+                self.commands.push(Command::Video {
+                    rect,
+                    player: id as u32,
+                });
+                let has_controls = node.attr("controls").map_or(true, |v| v != "false");
+                if has_controls {
+                    let bar_h = 32.0f32.min(height);
+                    let bar_rect = Rect::new(rect.x, rect.y + rect.height - bar_h, rect.width, bar_h);
+                    self.commands.push(Command::Fill {
+                        rect: bar_rect,
+                        color: Color::rgba(0x000000a0),
+                        radius: 0.0,
+                    });
+                    let is_playing = node.attr("playing").is_some()
+                        || node.attr("data-playing").is_some()
+                        || node.attr("autoplay").is_some();
+                    let play_sym = if is_playing { "❚❚" } else { "▶" };
+                    let mut play_btn = InlineText::new();
+                    let mut ctrl_style = style;
+                    ctrl_style.color = Color::rgb(0xffffff);
+                    ctrl_style.text.size = 14.0;
+                    play_btn.append(play_sym, None, ctrl_style)?;
+                    let _ = self.flush(
+                        &mut play_btn,
+                        ctrl_style,
+                        bar_rect.x + 8.0,
+                        bar_rect.y + 6.0,
+                        20.0,
+                    )?;
+                    let line_x = bar_rect.x + 36.0;
+                    let line_w = (bar_rect.width - 48.0).max(10.0);
+                    let line_y = bar_rect.y + bar_rect.height / 2.0 - 2.0;
+                    self.commands.push(Command::Fill {
+                        rect: Rect::new(line_x, line_y, line_w, 4.0),
+                        color: Color::rgba(0xffffff40),
+                        radius: 2.0,
+                    });
+                    let progress_w = if is_playing { line_w * 0.5 } else { line_w * 0.15 };
+                    self.commands.push(Command::Fill {
+                        rect: Rect::new(line_x, line_y, progress_w, 4.0),
+                        color: Color::rgb(0x1a73e8),
+                        radius: 2.0,
+                    });
+                }
+            }
+            (height, Some(format!("ko4:media:toggle:{id}")), false)
+        } else if node.name() == "audio" {
+            let width = if style.width != Length::Auto {
+                width
+            } else if let Some(w) = node
+                .attr("width")
+                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+            {
+                w
+            } else {
+                300.0
+            };
+            let height = specified_height
+                .or_else(|| {
+                    node.attr("height")
+                        .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                })
+                .unwrap_or(40.0);
+            let rect = Rect::new(content_x, content_y, width, height);
+            if style.visible {
+                if background.is_none() {
+                    self.commands.push(Command::Fill {
+                        rect,
+                        color: Color::rgb(0x1a202c),
+                        radius: 20.0,
+                    });
+                }
+                let is_playing = node.attr("playing").is_some()
+                    || node.attr("data-playing").is_some()
+                    || node.attr("autoplay").is_some();
+                let play_sym = if is_playing { "❚❚" } else { "▶" };
+                let mut play_btn = InlineText::new();
+                let mut ctrl_style = style;
+                ctrl_style.color = Color::rgb(0xffffff);
+                ctrl_style.text.size = 14.0;
+                play_btn.append(play_sym, None, ctrl_style)?;
+                let _ = self.flush(
+                    &mut play_btn,
+                    ctrl_style,
+                    content_x + 14.0,
+                    content_y + 10.0,
+                    20.0,
+                )?;
+                let line_x = content_x + 38.0;
+                let line_w = (width - 80.0).max(10.0);
+                let line_y = content_y + height / 2.0 - 2.0;
+                self.commands.push(Command::Fill {
+                    rect: Rect::new(line_x, line_y, line_w, 4.0),
+                    color: Color::rgba(0xffffff40),
+                    radius: 2.0,
+                });
+                let progress_w = if is_playing { line_w * 0.5 } else { line_w * 0.15 };
+                self.commands.push(Command::Fill {
+                    rect: Rect::new(line_x, line_y, progress_w, 4.0),
+                    color: Color::rgb(0x1a73e8),
+                    radius: 2.0,
+                });
+                let mut icon_text = InlineText::new();
+                let mut icon_style = style;
+                icon_style.color = Color::rgb(0xffffff);
+                icon_style.text.size = 14.0;
+                icon_text.append("🔊", None, icon_style)?;
+                let _ = self.flush(
+                    &mut icon_text,
+                    icon_style,
+                    content_x + width - 34.0,
+                    content_y + 10.0,
+                    24.0,
+                )?;
+            }
+            (height, Some(format!("ko4:media:toggle:{id}")), false)
         } else if node.name() == "input" {
             let kind = node.attr("type").unwrap_or("text").to_ascii_lowercase();
             let value = node.attr("value").unwrap_or("");
@@ -1941,5 +2091,103 @@ mod tests {
 
         assert!(result.links.iter().any(|l| l.href == format!("ko4:input:{ta}")));
         assert!(measurer.0.iter().any(|t| t.contains("First line\nSecond line")));
+    }
+
+    #[test]
+    fn test_video_layout_and_commands() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                style: TextStyle,
+                width: f32,
+                links: &[TextRange],
+            ) -> Result<TextMetrics, String> {
+                self.0.push(text.to_owned());
+                FixedText.measure(text, style, width, links)
+            }
+        }
+
+        let page = parse_html(
+            r#"
+            <video id="v1" width="400" height="225" controls></video>
+            <video id="v2"></video>
+            <video id="v3" data-playing controls></video>
+            "#,
+        )
+        .unwrap();
+
+        let v1 = page.element_by_id("v1").unwrap();
+        let v2 = page.element_by_id("v2").unwrap();
+        let v3 = page.element_by_id("v3").unwrap();
+
+        let mut measurer = TextCapture(Vec::new());
+        let result = layout(&page, 800.0, &mut measurer, |_| None, None).unwrap();
+
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v1}")));
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v2}")));
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v3}")));
+
+        let v1_cmd = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Video { rect, player } if *player == v1 as u32 && rect.width == 400.0 && rect.height == 225.0)
+        });
+        assert!(v1_cmd.is_some(), "v1 Command::Video with 400x225 should exist");
+
+        let v2_cmd = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Video { rect, player } if *player == v2 as u32 && rect.width == 320.0 && rect.height == 180.0)
+        });
+        assert!(v2_cmd.is_some(), "v2 Command::Video with default 320x180 should exist");
+
+        let v1_controls_bar = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Fill { rect, color, .. } if rect.width == 400.0 && rect.height == 32.0 && *color == Color::rgba(0x000000a0))
+        });
+        assert!(v1_controls_bar.is_some(), "Controls bar for v1 should exist");
+
+        assert!(measurer.0.contains(&"▶".to_string()));
+        assert!(measurer.0.contains(&"❚❚".to_string()));
+    }
+
+    #[test]
+    fn test_audio_layout_and_commands() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                style: TextStyle,
+                width: f32,
+                links: &[TextRange],
+            ) -> Result<TextMetrics, String> {
+                self.0.push(text.to_owned());
+                FixedText.measure(text, style, width, links)
+            }
+        }
+
+        let page = parse_html(
+            r#"
+            <audio id="a1" controls></audio>
+            <audio id="a2" playing controls></audio>
+            "#,
+        )
+        .unwrap();
+
+        let a1 = page.element_by_id("a1").unwrap();
+        let a2 = page.element_by_id("a2").unwrap();
+
+        let mut measurer = TextCapture(Vec::new());
+        let result = layout(&page, 800.0, &mut measurer, |_| None, None).unwrap();
+
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{a1}")));
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{a2}")));
+
+        let a1_bar = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Fill { rect, color, radius } if rect.width == 300.0 && rect.height == 40.0 && *radius == 20.0 && *color == Color::rgb(0x1a202c))
+        });
+        assert!(a1_bar.is_some(), "Audio rounded bar with 300x40 and radius 20 should exist");
+
+        assert!(measurer.0.contains(&"▶".to_string()));
+        assert!(measurer.0.contains(&"❚❚".to_string()));
+        assert!(measurer.0.contains(&"🔊".to_string()));
     }
 }

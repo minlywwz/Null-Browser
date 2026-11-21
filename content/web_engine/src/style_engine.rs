@@ -245,9 +245,37 @@ impl Style {
                 style.display = Display::None;
                 return style;
             }
+            "video" => {
+                style.display = Display::Block;
+                style.background = Color::rgb(0x000000);
+                style.radius = 6.0;
+                let size = |attribute| {
+                    node.attr(attribute)
+                        .and_then(|value| value.trim().trim_end_matches("px").parse::<u32>().ok())
+                        .map_or(Length::Auto, |value| Length::Px(value.min(16_384) as f32))
+                };
+                let w = size("width");
+                let h = size("height");
+                style.width = if w != Length::Auto { w } else { Length::Px(320.0) };
+                style.height = if h != Length::Auto { h } else { Length::Px(180.0) };
+            }
+            "audio" => {
+                style.display = Display::Block;
+                style.background = Color::rgb(0x1a202c);
+                style.radius = 20.0;
+                let size = |attribute| {
+                    node.attr(attribute)
+                        .and_then(|value| value.trim().trim_end_matches("px").parse::<u32>().ok())
+                        .map_or(Length::Auto, |value| Length::Px(value.min(16_384) as f32))
+                };
+                let w = size("width");
+                let h = size("height");
+                style.width = if w != Length::Auto { w } else { Length::Px(300.0) };
+                style.height = if h != Length::Auto { h } else { Length::Px(40.0) };
+            }
             // These elements are deliberately inert in the supported subset.
             "head" | "title" | "style" | "script" | "meta" | "base" | "link" | "template"
-            | "iframe" | "object" | "embed" | "video" | "audio" => {
+            | "iframe" | "object" | "embed" => {
                 style.display = Display::None;
                 return style;
             }

@@ -704,7 +704,7 @@ fn descendant(document: &Document, ancestor: NodeId, node: NodeId) -> bool {
 pub(crate) fn is_inert(tag: &str) -> bool {
     matches!(
         tag,
-        "template" | "iframe" | "object" | "embed" | "video" | "audio"
+        "template" | "iframe" | "object" | "embed"
     )
 }
 

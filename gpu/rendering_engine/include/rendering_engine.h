@@ -14,6 +14,7 @@ enum { BROWSER_RENDERER_ABI = 3 };
 typedef struct BrowserRenderer BrowserRenderer;
 typedef struct BrowserTextFactory BrowserTextFactory;
 typedef struct BrowserTextLayout BrowserTextLayout;
+typedef struct BrowserMediaPlayer BrowserMediaPlayer;
 
 typedef struct BrowserRect {
     float x, y, width, height;
@@ -55,6 +56,7 @@ enum BrowserCommandKind {
     BROWSER_IMAGE = 3,
     BROWSER_PUSH_CLIP = 4,
     BROWSER_POP_CLIP = 5,
+    BROWSER_VIDEO = 6,
 };
 
 typedef struct BrowserCommand {
@@ -123,6 +125,16 @@ int32_t browser_text_layout_create(BrowserTextFactory* factory,
 const BrowserHitRegion* browser_text_layout_hits(const BrowserTextLayout* layout,
     uint32_t* count) BROWSER_NOEXCEPT;
 void browser_text_layout_destroy(BrowserTextLayout* layout) BROWSER_NOEXCEPT;
+
+int32_t browser_media_player_create(BrowserRenderer* renderer,
+    const uint16_t* source_url, BrowserMediaPlayer** result) BROWSER_NOEXCEPT;
+int32_t browser_media_player_play(BrowserMediaPlayer* player) BROWSER_NOEXCEPT;
+int32_t browser_media_player_pause(BrowserMediaPlayer* player) BROWSER_NOEXCEPT;
+int32_t browser_media_player_get_state(BrowserMediaPlayer* player,
+    uint32_t* is_playing, float* position_secs, float* duration_secs) BROWSER_NOEXCEPT;
+int32_t browser_media_player_seek(BrowserMediaPlayer* player, float position_secs) BROWSER_NOEXCEPT;
+uint32_t browser_media_player_get_id(const BrowserMediaPlayer* player) BROWSER_NOEXCEPT;
+void browser_media_player_destroy(BrowserMediaPlayer* player) BROWSER_NOEXCEPT;
 
 #ifdef __cplusplus
 }

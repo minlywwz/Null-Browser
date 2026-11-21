@@ -21,6 +21,7 @@ pub enum ControlAction {
     Submit(u32),
     Toggle(u32),
     Radio(u32),
+    MediaToggle(u32),
 }
 
 pub fn parse_control_action(href: &str) -> Option<ControlAction> {
@@ -34,6 +35,8 @@ pub fn parse_control_action(href: &str) -> Option<ControlAction> {
         Some(ControlAction::Toggle(id))
     } else if let Some(id) = href.strip_prefix("ko4:radio:").and_then(|v| v.parse().ok()) {
         Some(ControlAction::Radio(id))
+    } else if let Some(id) = href.strip_prefix("ko4:media:toggle:").and_then(|v| v.parse().ok()) {
+        Some(ControlAction::MediaToggle(id))
     } else {
         None
     }
@@ -45,7 +48,8 @@ pub fn control_target(href: &str) -> Option<u32> {
         | ControlAction::Input(id)
         | ControlAction::Submit(id)
         | ControlAction::Toggle(id)
-        | ControlAction::Radio(id) => id,
+        | ControlAction::Radio(id)
+        | ControlAction::MediaToggle(id) => id,
     })
 }
 
@@ -101,6 +105,12 @@ mod tests {
             Some(ControlAction::Radio(90))
         );
         assert_eq!(control_target("ko4:radio:90"), Some(90));
+
+        assert_eq!(
+            parse_control_action("ko4:media:toggle:42"),
+            Some(ControlAction::MediaToggle(42))
+        );
+        assert_eq!(control_target("ko4:media:toggle:42"), Some(42));
 
         assert_eq!(parse_control_action("https://example.com"), None);
         assert_eq!(control_target("https://example.com"), None);

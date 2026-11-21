@@ -1,4 +1,5 @@
 #include "rendering_engine.h"
+#include "media_player.h"
 #include "motion_engine/motion_engine.h"
 #include "text.h"
 
@@ -47,13 +48,23 @@ struct BrowserRenderer {
         if (frame_latency) {
             CloseHandle(frame_latency);
         }
+        for (auto& p : media_players) {
+            if (p) {
+                p->on_renderer_destroyed();
+            }
+        }
+        media_players.clear();
     }
 
     HRESULT initialize(HWND window, uint32_t width, uint32_t height, uint32_t dpi, bool force_warp);
     HRESULT resize(uint32_t width, uint32_t height, uint32_t dpi);
     HRESULT draw(const BrowserFrame& frame, BrowserFrameResult& result);
     HRESULT read_pixel(uint32_t x, uint32_t y, uint32_t& bgra);
+    HRESULT create_media_player(const uint16_t* source_url, BrowserMediaPlayer** result);
+    void remove_media_player(BrowserMediaPlayer* player);
+    HRESULT create_bitmap(uint32_t width, uint32_t height, ID2D1Bitmap1** out_bitmap);
     bool warp = false;
+    std::vector<std::unique_ptr<BrowserMediaPlayer>> media_players;
 
 private:
     HRESULT create_output(uint32_t width, uint32_t height, uint32_t dpi);
@@ -320,6 +331,52 @@ void BrowserRenderer::draw_layer(const BrowserLayer& layer) {
                 d2d->DrawBitmap(bitmap, &bounds, 1.0f, D2D1_INTERPOLATION_MODE_LINEAR);
             }
             break;
+        case BROWSER_VIDEO: {
+            BrowserMediaPlayer* player = nullptr;
+            if (command.resource < media_players.size()) {
+                player = media_players[command.resource].get();
+            }
+            ID2D1Bitmap1* frame_bitmap = nullptr;
+            if (player) {
+                player->update_frame();
+                frame_bitmap = player->current_frame();
+            }
+            if (frame_bitmap) {
+                d2d->DrawBitmap(frame_bitmap, &bounds, 1.0f, D2D1_INTERPOLATION_MODE_LINEAR);
+            } else {
+                brush->SetColor(D2D1::ColorF(0x101418));
+                d2d->FillRectangle(bounds, brush.Get());
+
+                brush->SetColor(D2D1::ColorF(0x283038));
+                d2d->DrawRectangle(bounds, brush.Get(), 1.0f);
+
+                const float cx = bounds.left + (bounds.right - bounds.left) * 0.5f;
+                const float cy = bounds.top + (bounds.bottom - bounds.top) * 0.5f;
+                const float size = std::min(command.rect.width, command.rect.height) * 0.2f;
+                if (size > 2.0f) {
+                    brush->SetColor(D2D1::ColorF(0x000000, 0.6f));
+                    d2d->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), size * 1.2f, size * 1.2f), brush.Get());
+
+                    ComPtr<ID2D1Factory> d2d_factory;
+                    d2d->GetFactory(&d2d_factory);
+                    ComPtr<ID2D1PathGeometry> path;
+                    if (d2d_factory && SUCCEEDED(d2d_factory->CreatePathGeometry(&path))) {
+                        ComPtr<ID2D1GeometrySink> sink;
+                        if (SUCCEEDED(path->Open(&sink))) {
+                            sink->BeginFigure(D2D1::Point2F(cx - size * 0.5f, cy - size * 0.7f), D2D1_FIGURE_BEGIN_FILLED);
+                            sink->AddLine(D2D1::Point2F(cx + size * 0.8f, cy));
+                            sink->AddLine(D2D1::Point2F(cx - size * 0.5f, cy + size * 0.7f));
+                            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                            sink->Close();
+
+                            brush->SetColor(D2D1::ColorF(D2D1::ColorF::White, 0.9f));
+                            d2d->FillGeometry(path.Get(), brush.Get());
+                        }
+                    }
+                }
+            }
+            break;
+        }
         }
     }
     while (clips > 0) {
@@ -521,4 +578,64 @@ int32_t browser_renderer_read_pixel(BrowserRenderer* renderer, uint32_t x, uint3
 
 void browser_renderer_destroy(BrowserRenderer* renderer) noexcept {
     delete renderer;
+}
+
+HRESULT BrowserRenderer::create_media_player(const uint16_t* source_url, BrowserMediaPlayer** result) {
+    auto player = std::make_unique<BrowserMediaPlayer>(this, source_url);
+    HRESULT hr = player->initialize();
+    if (FAILED(hr)) {
+        return hr;
+    }
+    player->set_id(static_cast<uint32_t>(media_players.size()));
+    *result = player.get();
+    media_players.push_back(std::move(player));
+    return S_OK;
+}
+
+void BrowserRenderer::remove_media_player(BrowserMediaPlayer* player) {
+    for (auto& p : media_players) {
+        if (p.get() == player) {
+            p.reset();
+            break;
+        }
+    }
+}
+
+HRESULT BrowserRenderer::create_bitmap(uint32_t w, uint32_t h, ID2D1Bitmap1** out_bitmap) {
+    if (!d2d || !out_bitmap) {
+        return E_FAIL;
+    }
+    const auto props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(pixel_format, D2D1_ALPHA_MODE_IGNORE),
+        96.0f, 96.0f
+    );
+    return d2d->CreateBitmap(D2D1::SizeU(w, h), nullptr, 0, &props, out_bitmap);
+}
+
+HRESULT browser_renderer_create_bitmap(BrowserRenderer* renderer, uint32_t width, uint32_t height, ID2D1Bitmap1** out_bitmap) {
+    if (!renderer) return E_POINTER;
+    return renderer->create_bitmap(width, height, out_bitmap);
+}
+
+int32_t browser_media_player_create(BrowserRenderer* renderer,
+    const uint16_t* source_url, BrowserMediaPlayer** result) noexcept {
+    if (!renderer || !result) {
+        return E_INVALIDARG;
+    }
+    *result = nullptr;
+    try {
+        return renderer->create_media_player(source_url, result);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
+void browser_media_player_destroy(BrowserMediaPlayer* player) noexcept {
+    if (!player) return;
+    if (player->renderer) {
+        player->renderer->remove_media_player(player);
+    }
 }

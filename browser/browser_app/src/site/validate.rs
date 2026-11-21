@@ -79,6 +79,7 @@ pub(super) fn prepare_snapshot(
                 layout,
             } => rect_valid(*bounds) && color_valid(*color) && (*layout as usize) < text_count,
             Command::Image { rect, image } => rect_valid(*rect) && (*image as usize) < images.len(),
+            Command::Video { rect, .. } => rect_valid(*rect),
         };
         if !valid {
             return Err(invalid());
