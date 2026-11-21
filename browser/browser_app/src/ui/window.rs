@@ -9,7 +9,7 @@ use std::{
 };
 
 use browser_core::{
-    Accent, Example, History, Location, Settings, ToolbarPosition, Visit, resolve_link,
+    Accent, Example, Location, Settings, TabId, TabManager, ToolbarPosition, Visit, resolve_link,
 };
 use display_list::Rect;
 use network_stack::Url;
@@ -295,7 +295,7 @@ struct App {
     log: Log,
     document: DocumentWorker,
     renderer: RenderWorker,
-    history: History,
+    tabs: TabManager,
     settings: Settings,
     geometry: Option<Geometry>,
     pending: Option<Navigation>,
@@ -334,7 +334,7 @@ impl App {
     }
 
     fn model(&self) -> Model {
-        let location = self.history.current();
+        let location = self.tabs.active_tab().location();
         let loading = self.pending.as_ref().is_some_and(|nav| {
             nav.visit != Visit::Current || nav.reload || self.geometry.is_none()
         });
@@ -357,14 +357,25 @@ impl App {
                 _ => format!("Local  /  {}", location.label()),
             }
         };
+        let tabs = self
+            .tabs
+            .tabs()
+            .iter()
+            .map(|tab| chrome::TabViewModel {
+                id: tab.id.0,
+                title: tab.title.clone(),
+                active: tab.id == self.tabs.active_id(),
+            })
+            .collect();
         Model {
             width: self.client.width(),
             height: self.client.height(),
             title,
             status: self.status.clone(),
             settings: self.settings,
-            can_back: self.history.target(Visit::Back).is_some(),
-            can_forward: self.history.target(Visit::Forward).is_some(),
+            tabs,
+            can_back: self.tabs.active_tab().history.target(Visit::Back).is_some(),
+            can_forward: self.tabs.active_tab().history.target(Visit::Forward).is_some(),
             loading,
             menu: self.menu,
             editing: self.editing,
@@ -434,7 +445,7 @@ impl App {
             return;
         }
         let navigation = self.pending.get_or_insert_with(|| Navigation {
-            location: self.history.current().clone(),
+            location: self.tabs.active_tab().location().clone(),
             visit: Visit::Current,
             scroll: None,
             anchor: None,
@@ -489,9 +500,9 @@ impl App {
                     let transition = self.geometry.is_some()
                         && !self.demo
                         && self.motion_ms() > 0
-                        && pending.location != *self.history.current()
+                        && pending.location != *self.tabs.active_tab().location()
                         && matches!(
-                            (&pending.location, self.history.current()),
+                            (&pending.location, self.tabs.active_tab().location()),
                             (Location::Example(_), Location::Example(_))
                         );
                     let scroll = pending
@@ -509,7 +520,7 @@ impl App {
                     self.geometry = Some(page.geometry);
                     self.scroll = scroll.clamp(0.0, self.max_scroll());
                     let location = page.resolved.map(Location::Web).unwrap_or(pending.location);
-                    self.history.commit(pending.visit, location, self.scroll);
+                    self.tabs.active_tab_mut().history.commit(pending.visit, location, self.scroll);
                     self.committed = completion.generation;
                     let page_title = self
                         .geometry
@@ -517,7 +528,7 @@ impl App {
                         .map(|page| page.title.trim())
                         .filter(|title| !title.is_empty())
                         .map(str::to_owned)
-                        .unwrap_or_else(|| self.history.current().label());
+                        .unwrap_or_else(|| self.tabs.active_tab().location().label());
                     let page_title: String = page_title.chars().filter(|character| {
                         !character.is_control() && !matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
                     }).take(160).collect();
@@ -542,15 +553,87 @@ impl App {
         }
     }
 
+    fn new_tab(&mut self) {
+        self.tabs.active_tab_mut().scroll = self.scroll;
+        self.tabs.new_tab(Location::Example(Example::Start));
+        self.geometry = None;
+        self.scroll = 0.0;
+        self.open(Location::Example(Example::Start));
+    }
+
+    fn close_tab(&mut self, id: usize) {
+        let was_active = self.tabs.active_id() == TabId(id);
+        if was_active {
+            self.tabs.active_tab_mut().scroll = self.scroll;
+        }
+        self.tabs.close_tab(TabId(id));
+        self.geometry = None;
+        self.scroll = self.tabs.active_tab().scroll;
+        self.open(self.tabs.active_tab().location().clone());
+    }
+
+    fn close_active_tab(&mut self) {
+        self.close_tab(self.tabs.active_id().0);
+    }
+
+    fn select_tab(&mut self, id: usize) {
+        if id == self.tabs.active_id().0 {
+            return;
+        }
+        self.tabs.active_tab_mut().scroll = self.scroll;
+        if self.tabs.select_tab(TabId(id)) {
+            self.scroll = self.tabs.active_tab().scroll;
+            self.geometry = None;
+            self.open(self.tabs.active_tab().location().clone());
+        }
+    }
+
+    fn select_tab_index(&mut self, index: usize) {
+        if index == self.tabs.active_index() {
+            return;
+        }
+        self.tabs.active_tab_mut().scroll = self.scroll;
+        if self.tabs.select_index(index) {
+            self.scroll = self.tabs.active_tab().scroll;
+            self.geometry = None;
+            self.open(self.tabs.active_tab().location().clone());
+        }
+    }
+
+    fn select_next_tab(&mut self) {
+        if self.tabs.tab_count() <= 1 {
+            return;
+        }
+        self.tabs.active_tab_mut().scroll = self.scroll;
+        self.tabs.select_next();
+        self.scroll = self.tabs.active_tab().scroll;
+        self.geometry = None;
+        self.open(self.tabs.active_tab().location().clone());
+    }
+
+    fn select_prev_tab(&mut self) {
+        if self.tabs.tab_count() <= 1 {
+            return;
+        }
+        self.tabs.active_tab_mut().scroll = self.scroll;
+        self.tabs.select_prev();
+        self.scroll = self.tabs.active_tab().scroll;
+        self.geometry = None;
+        self.open(self.tabs.active_tab().location().clone());
+    }
+
     fn open(&mut self, location: Location) {
+        let same = &location == self.tabs.active_tab().location();
+        let scroll = if same { Some(self.scroll) } else { Some(0.0) };
+        let visit = if same { Visit::Current } else { Visit::New };
         self.demo = false;
         self.studio = false;
         self.menu = false;
         self.status = None;
         self.request(Navigation {
             location,
-            visit: Visit::New,
-            scroll: Some(0.0),
+            visit,
+            scroll,
             anchor: None,
             reload: false,
             click: None,
@@ -558,7 +641,7 @@ impl App {
     }
 
     fn travel(&mut self, visit: Visit) {
-        if let Some((location, scroll)) = self.history.target(visit) {
+        if let Some((location, scroll)) = self.tabs.active_tab().history.target(visit) {
             self.demo = false;
             self.studio = false;
             self.menu = false;
@@ -578,7 +661,7 @@ impl App {
         let anchor = url.fragment().map(str::to_owned);
         url.set_fragment(None);
         let location = Location::Web(url);
-        let same = &location == self.history.current();
+        let same = &location == self.tabs.active_tab().location();
         self.demo = false;
         self.studio = false;
         self.menu = false;
@@ -597,7 +680,7 @@ impl App {
         self.menu = false;
         self.status = None;
         self.request(Navigation {
-            location: self.history.current().clone(),
+            location: self.tabs.active_tab().location().clone(),
             visit: Visit::Current,
             scroll: None,
             anchor: None,
@@ -620,7 +703,7 @@ impl App {
         self.status = None;
         self.editing = true;
         self.position_address();
-        let value = match self.history.current() {
+        let value = match self.tabs.active_tab().location() {
             Location::Web(url) => url.as_str(),
             _ => "",
         };
@@ -637,14 +720,14 @@ impl App {
     fn set_scroll(&mut self, scroll: f32) {
         if !self.demo && !self.studio {
             self.scroll = scroll.clamp(0.0, self.max_scroll());
-            self.history.set_scroll(self.scroll);
+            self.tabs.active_tab_mut().history.set_scroll(self.scroll);
         }
     }
 
     fn activate_control(&mut self, node: u32) {
         self.status = None;
         self.request(Navigation {
-            location: self.history.current().clone(),
+            location: self.tabs.active_tab().location().clone(),
             visit: Visit::Current,
             scroll: Some(self.scroll),
             anchor: None,
@@ -654,12 +737,12 @@ impl App {
     }
 
     fn follow(&mut self, href: &str) {
-        let Some((location, anchor)) = resolve_link(self.history.current(), href) else {
+        let Some((location, anchor)) = resolve_link(self.tabs.active_tab().location(), href) else {
             self.status = Some("This link cannot be opened in the current document.".into());
             return;
         };
         self.status = None;
-        if &location == self.history.current() {
+        if &location == self.tabs.active_tab().location() {
             if let Some(anchor) = anchor {
                 let y = if anchor.is_empty() {
                     Some(0.0)
@@ -693,6 +776,9 @@ impl App {
             Action::Forward => self.travel(Visit::Forward),
             Action::Reload => self.reload(),
             Action::Address => self.edit_address(),
+            Action::SelectTab(id) => self.select_tab(id),
+            Action::CloseTab(id) => self.close_tab(id),
+            Action::NewTab => self.new_tab(),
             Action::Menu => {
                 self.menu = !self.menu;
                 self.studio = false;
@@ -843,11 +929,11 @@ impl App {
                 .buttons
                 .into_iter()
                 .filter_map(|(action, _)| {
-                    (action != Action::Back || self.history.target(Visit::Back).is_some())
+                    (action != Action::Back || self.tabs.active_tab().history.target(Visit::Back).is_some())
                         .then_some(action)
                         .filter(|action| {
                             *action != Action::Forward
-                                || self.history.target(Visit::Forward).is_some()
+                                || self.tabs.active_tab().history.target(Visit::Forward).is_some()
                         })
                 })
                 .collect()
@@ -1246,6 +1332,13 @@ pub fn run(options: Options, log: Log) -> Result<(), String> {
         DocumentWorker::start(window as usize, log.clone()).map_err(|error| error.to_string())?;
     let renderer = RenderWorker::start(window as usize, options.warp, log.clone())
         .map_err(|error| error.to_string())?;
+    let initial_location = if let Some(path) = &options.file {
+        Location::File(path.clone())
+    } else if let Some(url) = &options.url {
+        Location::Web(url.clone())
+    } else {
+        Location::Example(Example::Start)
+    };
     let mut app = App {
         window,
         address_bar,
@@ -1256,7 +1349,7 @@ pub fn run(options: Options, log: Log) -> Result<(), String> {
         log,
         document,
         renderer,
-        history: History::default(),
+        tabs: TabManager::new(initial_location),
         settings,
         geometry: None,
         pending: None,

@@ -4,13 +4,25 @@ use rendering_ffi::{PreparedScene, TextBatch, TextFactory};
 
 pub const BACKGROUND: Color = Color::rgb(0x101216);
 pub const ADDRESS_BACKGROUND: u32 = 0x20262e;
-const TOOLBAR: f32 = 56.0;
+pub const TAB_BAR: f32 = 34.0;
+pub const NAV_BAR: f32 = 52.0;
+pub const TOOLBAR: f32 = TAB_BAR + NAV_BAR;
 const INK: Color = Color::rgb(0xe8eef8);
 const MUTED: Color = Color::rgb(0xa6b6cc);
 const PANEL: Color = Color::rgb(0x121c2a);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabViewModel {
+    pub id: usize,
+    pub title: String,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    SelectTab(usize),
+    CloseTab(usize),
+    NewTab,
     Back,
     Forward,
     Reload,
@@ -33,6 +45,7 @@ pub struct Model {
     pub title: String,
     pub status: Option<String>,
     pub settings: Settings,
+    pub tabs: Vec<TabViewModel>,
     pub can_back: bool,
     pub can_forward: bool,
     pub editing: bool,
@@ -49,6 +62,7 @@ pub struct Model {
 
 pub struct Geometry {
     pub toolbar: Rect,
+    pub tab_bar: Rect,
     pub viewport: Rect,
     pub address: Rect,
     pub studio: Option<Rect>,
@@ -93,15 +107,35 @@ impl Geometry {
             view.height
         };
         let toolbar = Rect::new(0.0, toolbar_y, model.width, TOOLBAR);
-        let y = toolbar_y + 9.0;
-        let address = Rect::new(128.0, y, (model.width - 185.0).max(1.0), 38.0);
-        let mut buttons = vec![
-            (Action::Back, Rect::new(12.0, y, 34.0, 38.0)),
-            (Action::Forward, Rect::new(48.0, y, 34.0, 38.0)),
-            (Action::Reload, Rect::new(84.0, y, 34.0, 38.0)),
-            (Action::Address, address),
-            (Action::Menu, Rect::new(model.width - 46.0, y, 34.0, 38.0)),
-        ];
+        let (tab_bar_y, nav_y) = if model.settings.position == ToolbarPosition::Top {
+            (toolbar_y, toolbar_y + TAB_BAR + 7.0)
+        } else {
+            (toolbar_y + NAV_BAR, toolbar_y + 7.0)
+        };
+        let tab_bar = Rect::new(0.0, tab_bar_y, model.width, TAB_BAR);
+        let address = Rect::new(128.0, nav_y, (model.width - 185.0).max(1.0), 38.0);
+        let mut buttons = Vec::new();
+
+        let tab_count = model.tabs.len().max(1) as f32;
+        let available_w = (model.width - 60.0).max(60.0);
+        let tab_w = (available_w / tab_count - 4.0).clamp(70.0, 180.0);
+        for (i, tab) in model.tabs.iter().enumerate() {
+            let tab_rect = Rect::new(8.0 + i as f32 * (tab_w + 4.0), tab_bar_y + 3.0, tab_w, 28.0);
+            buttons.push((Action::SelectTab(tab.id), tab_rect));
+            let close_rect = Rect::new(tab_rect.x + tab_rect.width - 22.0, tab_rect.y + 5.0, 18.0, 18.0);
+            buttons.push((Action::CloseTab(tab.id), close_rect));
+        }
+
+        let new_tab_x = 8.0 + model.tabs.len() as f32 * (tab_w + 4.0) + 2.0;
+        let new_tab_rect = Rect::new(new_tab_x, tab_bar_y + 4.0, 26.0, 26.0);
+        buttons.push((Action::NewTab, new_tab_rect));
+
+        buttons.push((Action::Back, Rect::new(12.0, nav_y, 34.0, 38.0)));
+        buttons.push((Action::Forward, Rect::new(48.0, nav_y, 34.0, 38.0)));
+        buttons.push((Action::Reload, Rect::new(84.0, nav_y, 34.0, 38.0)));
+        buttons.push((Action::Address, address));
+        buttons.push((Action::Menu, Rect::new(model.width - 46.0, nav_y, 34.0, 38.0)));
+
         let preview = preview(view);
         if model.demo {
             buttons.push((Action::Fullscreen, preview));
@@ -149,6 +183,7 @@ impl Geometry {
         });
         Self {
             toolbar,
+            tab_bar,
             viewport: view,
             address,
             studio,
@@ -257,6 +292,106 @@ pub fn build(factory: &TextFactory, model: &Model) -> Result<PreparedScene, Stri
             Color::rgb(0x2b3038),
             0.0,
         );
+
+        paint.fill(bounds.tab_bar, Color::rgb(0x13151a), 0.0);
+        let tab_divider_y = if model.settings.position == ToolbarPosition::Top {
+            bounds.tab_bar.y + bounds.tab_bar.height - 1.0
+        } else {
+            bounds.tab_bar.y
+        };
+        paint.fill(
+            Rect::new(0.0, tab_divider_y, model.width, 1.0),
+            Color::rgb(0x242830),
+            0.0,
+        );
+
+        let tab_count = model.tabs.len().max(1) as f32;
+        let available_w = (model.width - 60.0).max(60.0);
+        let tab_w = (available_w / tab_count - 4.0).clamp(70.0, 180.0);
+        let tab_bar_y = bounds.tab_bar.y;
+
+        for (i, tab) in model.tabs.iter().enumerate() {
+            let tab_rect = Rect::new(8.0 + i as f32 * (tab_w + 4.0), tab_bar_y + 3.0, tab_w, 28.0);
+            let close_rect = Rect::new(tab_rect.x + tab_rect.width - 22.0, tab_rect.y + 5.0, 18.0, 18.0);
+
+            if tab.active {
+                paint.fill(tab_rect, Color::rgb(0x222730), 6.0);
+                paint.fill(
+                    Rect::new(tab_rect.x, tab_rect.y, tab_rect.width, 2.0),
+                    accent_color,
+                    1.0,
+                );
+            } else {
+                let hovered = model.hovered == Some(Action::SelectTab(tab.id));
+                let bg = if hovered {
+                    Color::rgb(0x1c202a)
+                } else {
+                    Color::rgb(0x161920)
+                };
+                paint.fill(tab_rect, bg, 6.0);
+            }
+
+            let tab_text_color = if tab.active { INK } else { MUTED };
+            let tab_style = TextStyle {
+                size: 12.0,
+                weight: if tab.active { 600 } else { 400 },
+                align: TextAlign::Start,
+            };
+            let label_width = (tab_rect.width - 34.0).max(1.0);
+            let label_rect = Rect::new(tab_rect.x + 10.0, tab_rect.y, label_width, tab_rect.height);
+            let title = if tab.title.is_empty() {
+                "New Tab"
+            } else {
+                &tab.title
+            };
+            paint.label(title, label_rect, tab_text_color, tab_style)?;
+
+            let close_hovered = model.hovered == Some(Action::CloseTab(tab.id));
+            if close_hovered {
+                paint.fill(close_rect, Color::rgb(0x3a4252), 4.0);
+            }
+            paint.label(
+                "×",
+                close_rect,
+                if close_hovered { INK } else { MUTED },
+                TextStyle {
+                    size: 14.0,
+                    weight: 500,
+                    align: TextAlign::Center,
+                },
+            )?;
+        }
+
+        let new_tab_x = 8.0 + model.tabs.len() as f32 * (tab_w + 4.0) + 2.0;
+        let new_tab_rect = Rect::new(new_tab_x, tab_bar_y + 4.0, 26.0, 26.0);
+        let new_tab_hovered = model.hovered == Some(Action::NewTab);
+        let new_tab_focused = model.focused == Some(Action::NewTab);
+        let new_tab_bg = if new_tab_focused {
+            accent_color
+        } else if new_tab_hovered {
+            Color::rgb(0x282f3c)
+        } else {
+            Color::rgb(0x161920)
+        };
+        paint.fill(new_tab_rect, new_tab_bg, 5.0);
+        let plus_color = if new_tab_focused {
+            Color::rgb(0x111a24)
+        } else if new_tab_hovered {
+            INK
+        } else {
+            MUTED
+        };
+        paint.label(
+            "+",
+            new_tab_rect,
+            plus_color,
+            TextStyle {
+                size: 16.0,
+                weight: 500,
+                align: TextAlign::Center,
+            },
+        )?;
+
         let address_outline = if model.editing || model.focused == Some(Action::Address) {
             accent_color
         } else {
@@ -313,7 +448,7 @@ pub fn build(factory: &TextFactory, model: &Model) -> Result<PreparedScene, Stri
             );
         }
 
-        for &(action, rect) in bounds.buttons.iter().take(5) {
+        for &(action, rect) in &bounds.buttons {
             let (value, enabled, active) = match action {
                 Action::Back => ("←", model.can_back, false),
                 Action::Forward => ("→", model.can_forward, false),
@@ -535,4 +670,191 @@ pub fn build(factory: &TextFactory, model: &Model) -> Result<PreparedScene, Stri
         },
         Vec::new(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geometry_layout_tabs_and_nav() {
+        let model = Model {
+            width: 800.0,
+            height: 600.0,
+            title: "Test".into(),
+            status: None,
+            settings: Settings::default(),
+            tabs: vec![
+                TabViewModel {
+                    id: 0,
+                    title: "Tab 1".into(),
+                    active: true,
+                },
+                TabViewModel {
+                    id: 1,
+                    title: "Tab 2".into(),
+                    active: false,
+                },
+            ],
+            can_back: true,
+            can_forward: false,
+            editing: false,
+            loading: false,
+            menu: false,
+            studio: false,
+            demo: false,
+            fullscreen: false,
+            hovered: None,
+            focused: None,
+            scroll: 0.0,
+            scroll_max: 0.0,
+        };
+        let geom = Geometry::for_model(&model);
+        assert_eq!(geom.toolbar.height, TOOLBAR);
+        assert_eq!(geom.tab_bar.height, TAB_BAR);
+        assert_eq!(geom.tab_bar.y, 0.0);
+        assert_eq!(geom.action(10.0, 10.0), Some(Action::SelectTab(0)));
+
+        let close0_rect = geom
+            .buttons
+            .iter()
+            .find(|(a, _)| *a == Action::CloseTab(0))
+            .unwrap()
+            .1;
+        assert_eq!(
+            geom.action(close0_rect.x + 2.0, close0_rect.y + 2.0),
+            Some(Action::CloseTab(0))
+        );
+
+        let new_tab_rect = geom
+            .buttons
+            .iter()
+            .find(|(a, _)| *a == Action::NewTab)
+            .unwrap()
+            .1;
+        assert_eq!(
+            geom.action(new_tab_rect.x + 2.0, new_tab_rect.y + 2.0),
+            Some(Action::NewTab)
+        );
+
+        assert_eq!(geom.action(15.0, 50.0), Some(Action::Back));
+    }
+
+    #[test]
+    fn geometry_layout_bottom_position() {
+        let mut settings = Settings::default();
+        settings.position = ToolbarPosition::Bottom;
+        let model = Model {
+            width: 800.0,
+            height: 600.0,
+            title: "Test".into(),
+            status: None,
+            settings,
+            tabs: vec![TabViewModel {
+                id: 0,
+                title: "Start".into(),
+                active: true,
+            }],
+            can_back: false,
+            can_forward: false,
+            editing: false,
+            loading: false,
+            menu: false,
+            studio: false,
+            demo: false,
+            fullscreen: false,
+            hovered: None,
+            focused: None,
+            scroll: 0.0,
+            scroll_max: 0.0,
+        };
+        let geom = Geometry::for_model(&model);
+        assert_eq!(geom.toolbar.y, 600.0 - TOOLBAR);
+        assert_eq!(geom.tab_bar.y, geom.toolbar.y + NAV_BAR);
+        assert_eq!(geom.viewport.y, 0.0);
+        assert_eq!(geom.viewport.height, 600.0 - TOOLBAR);
+    }
+
+    #[test]
+    fn tab_width_clamping() {
+        // 1 tab with 800 width -> should clamp to 180.0
+        let model = Model {
+            width: 800.0,
+            height: 600.0,
+            title: "Test".into(),
+            status: None,
+            settings: Settings::default(),
+            tabs: vec![TabViewModel {
+                id: 0,
+                title: "Start".into(),
+                active: true,
+            }],
+            can_back: false,
+            can_forward: false,
+            editing: false,
+            loading: false,
+            menu: false,
+            studio: false,
+            demo: false,
+            fullscreen: false,
+            hovered: None,
+            focused: None,
+            scroll: 0.0,
+            scroll_max: 0.0,
+        };
+        let geom = Geometry::for_model(&model);
+        let tab_rect = geom.buttons.iter().find(|(a, _)| *a == Action::SelectTab(0)).unwrap().1;
+        assert_eq!(tab_rect.width, 180.0);
+
+        // 20 tabs -> should clamp down to 70.0 min
+        let tabs = (0..20)
+            .map(|id| TabViewModel {
+                id,
+                title: format!("Tab {id}"),
+                active: id == 0,
+            })
+            .collect();
+        let model_many = Model { tabs, ..model };
+        let geom_many = Geometry::for_model(&model_many);
+        let tab_rect_many = geom_many.buttons.iter().find(|(a, _)| *a == Action::SelectTab(0)).unwrap().1;
+        assert_eq!(tab_rect_many.width, 70.0);
+    }
+
+    #[test]
+    fn build_scene_with_tabs() {
+        let factory = TextFactory::new().unwrap();
+        let model = Model {
+            width: 800.0,
+            height: 600.0,
+            title: "Test".into(),
+            status: None,
+            settings: Settings::default(),
+            tabs: vec![
+                TabViewModel {
+                    id: 0,
+                    title: "Active Tab".into(),
+                    active: true,
+                },
+                TabViewModel {
+                    id: 1,
+                    title: "Inactive Tab".into(),
+                    active: false,
+                },
+            ],
+            can_back: true,
+            can_forward: false,
+            editing: false,
+            loading: false,
+            menu: false,
+            studio: false,
+            demo: false,
+            fullscreen: false,
+            hovered: Some(Action::CloseTab(0)),
+            focused: Some(Action::NewTab),
+            scroll: 0.0,
+            scroll_max: 0.0,
+        };
+        let scene = build(&factory, &model);
+        assert!(scene.is_ok());
+    }
 }
