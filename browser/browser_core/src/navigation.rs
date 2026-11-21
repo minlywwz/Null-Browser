@@ -107,6 +107,7 @@ pub enum Visit {
     Forward,
 }
 
+#[derive(Debug, Clone)]
 pub struct History {
     entries: Vec<(Location, f32)>,
     index: usize,
@@ -114,14 +115,26 @@ pub struct History {
 
 impl Default for History {
     fn default() -> Self {
-        Self {
-            entries: vec![(Location::Example(Example::Start), 0.0)],
-            index: 0,
-        }
+        Self::new(Location::Example(Example::Start))
     }
 }
 
 impl History {
+    pub fn new(location: Location) -> Self {
+        Self {
+            entries: vec![(location, 0.0)],
+            index: 0,
+        }
+    }
+
+    pub fn can_back(&self) -> bool {
+        self.index > 0
+    }
+
+    pub fn can_forward(&self) -> bool {
+        self.index + 1 < self.entries.len()
+    }
+
     pub fn current(&self) -> &Location {
         &self.entries[self.index].0
     }
