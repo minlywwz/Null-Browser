@@ -532,6 +532,7 @@ impl App {
                     let page_title: String = page_title.chars().filter(|character| {
                         !character.is_control() && !matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
                     }).take(160).collect();
+                    self.tabs.set_active_title(page_title.clone());
                     let title = wide(&format!("{page_title} — Browser"));
                     unsafe { SetWindowTextW(self.window, title.as_ptr()) };
                     self.update(Some(PageUpdate {
@@ -960,6 +961,16 @@ impl App {
             return;
         }
         match (key, control, alt) {
+            (0x54, true, false) => self.new_tab(),
+            (0x57, true, false) => self.close_active_tab(),
+            (VK_TAB, true, false) => {
+                if shift {
+                    self.select_prev_tab();
+                } else {
+                    self.select_next_tab();
+                }
+            }
+            (0x31..=0x39, true, false) => self.select_tab_index((key - 0x31) as usize),
             (0x4f, true, false) => self.activate(Action::Open),
             (0x4c, true, false) | (0x44, _, true) | (VK_F6, _, false) => self.edit_address(),
             (0x52, true, false) | (VK_F5, _, false) => self.reload(),
