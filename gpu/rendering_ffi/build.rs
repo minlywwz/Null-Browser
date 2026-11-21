@@ -17,7 +17,7 @@ fn main() {
         .file(native.join("src/text.cpp"))
         .file(native.join("src/motion_engine/motion_engine.cpp"))
         .compile("rendering_engine");
-    for library in ["d3d11", "dxgi", "d2d1", "dwrite"] {
+    for library in ["d3d11", "dxgi", "d2d1", "dwrite", "gdi32"] {
         println!("cargo:rustc-link-lib={library}");
     }
 }

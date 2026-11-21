@@ -19,6 +19,7 @@ pub const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_STYLESHEET_BYTES: usize = 256 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
+pub const MAX_FONT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 6;
 
 pub fn address(input: &str) -> Result<Url, String> {
@@ -57,6 +58,7 @@ pub enum ResourceKind {
     Stylesheet,
     Image,
     Script,
+    Font,
 }
 
 impl ResourceKind {
@@ -66,6 +68,7 @@ impl ResourceKind {
             Self::Stylesheet => MAX_STYLESHEET_BYTES,
             Self::Image => MAX_IMAGE_BYTES,
             Self::Script => MAX_SCRIPT_BYTES,
+            Self::Font => MAX_FONT_BYTES,
         }
     }
 
@@ -76,6 +79,9 @@ impl ResourceKind {
             Self::Image => "image/png, image/jpeg, image/webp, image/gif, image/svg+xml",
             Self::Script => {
                 "text/javascript, application/javascript, text/typescript, application/typescript, text/plain;q=0.8"
+            }
+            Self::Font => {
+                "font/woff2, font/woff, font/ttf, font/otf, application/font-woff, */*;q=0.8"
             }
         }
     }

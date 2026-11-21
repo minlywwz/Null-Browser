@@ -320,6 +320,7 @@ pub fn parse_html(input: &str) -> Result<Document, String> {
         title: String::new(),
         scripting: false,
         clickable: Default::default(),
+        font_faces: Vec::new(),
     };
     let mut stack = vec![0];
     while let Some(token) = tokenizer.next()? {
@@ -457,6 +458,7 @@ pub fn parse_html(input: &str) -> Result<Document, String> {
         }
     }
     restore_streamed_html(&mut document, MAX_DEPTH)?;
+    document.collect_font_faces();
     Ok(document)
 }
 

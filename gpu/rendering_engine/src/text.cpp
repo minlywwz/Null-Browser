@@ -9,6 +9,16 @@ using Microsoft::WRL::ComPtr;
 
 struct BrowserTextFactory {
     ComPtr<IDWriteFactory> value;
+    std::vector<std::wstring> custom_families;
+    std::vector<HANDLE> font_resources;
+
+    ~BrowserTextFactory() {
+        for (HANDLE h : font_resources) {
+            if (h) {
+                RemoveFontMemResourceEx(h);
+            }
+        }
+    }
 };
 
 int32_t browser_text_factory_create(BrowserTextFactory** result) noexcept {
@@ -30,6 +40,30 @@ int32_t browser_text_factory_create(BrowserTextFactory** result) noexcept {
 
 void browser_text_factory_destroy(BrowserTextFactory* factory) noexcept {
     delete factory;
+}
+
+int32_t browser_text_factory_register_font(BrowserTextFactory* factory,
+    const uint8_t* data, uint32_t length, const uint16_t* family_name,
+    uint32_t* font_id) noexcept {
+    if (!factory || !family_name || !font_id) {
+        return E_INVALIDARG;
+    }
+    try {
+        if (data && length > 0) {
+            DWORD count = 0;
+            HANDLE h = AddFontMemResourceEx((void*)data, length, nullptr, &count);
+            if (h) {
+                factory->font_resources.push_back(h);
+            }
+        }
+        factory->custom_families.push_back(reinterpret_cast<const wchar_t*>(family_name));
+        *font_id = 3 + static_cast<uint32_t>(factory->custom_families.size()) - 1;
+        return S_OK;
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    } catch (...) {
+        return E_FAIL;
+    }
 }
 
 int32_t browser_text_layout_create(BrowserTextFactory* factory, const uint16_t* text,
@@ -83,16 +117,20 @@ int32_t browser_text_layout_create(BrowserTextFactory* factory, const uint16_t* 
             const auto channel = [](float value) { return value >= 0 && value <= 1; };
             if (!range.length || range.start < run_end || range.start >= length
                 || range.length > length - range.start || !(run.size >= 1 && run.size <= 256)
-                || run.weight < 100 || run.weight > 900 || run.family > 2
+                || run.weight < 100 || run.weight > 900
+                || run.family >= 3 + factory->custom_families.size()
                 || !channel(ink.red) || !channel(ink.green) || !channel(ink.blue) || !channel(ink.alpha)) {
                 return E_INVALIDARG;
             }
             run_end = range.start + range.length;
             const DWRITE_TEXT_RANGE span{range.start, range.length};
             const wchar_t* families[] = {L"Segoe UI", L"Times New Roman", L"Consolas"};
+            const wchar_t* family_name = run.family < 3
+                ? families[run.family]
+                : factory->custom_families[run.family - 3].c_str();
             if (FAILED(hr = layout->value->SetFontSize(run.size, span))
                 || FAILED(hr = layout->value->SetFontWeight(static_cast<DWRITE_FONT_WEIGHT>(run.weight), span))
-                || FAILED(hr = layout->value->SetFontFamilyName(families[run.family], span))
+                || FAILED(hr = layout->value->SetFontFamilyName(family_name, span))
                 || FAILED(hr = layout->value->SetFontStyle(run.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, span))
                 || FAILED(hr = layout->value->SetUnderline(run.underline != 0, span))
                 || FAILED(hr = layout->value->SetStrikethrough(run.strikethrough != 0, span))) {

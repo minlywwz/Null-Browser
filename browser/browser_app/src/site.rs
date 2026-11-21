@@ -250,6 +250,13 @@ fn fetch_assets(network: &NetworkStack, document: &Url, resources: Resources) ->
                 .take(web_content_process::MAX_SCRIPTS)
                 .map(|reference| (reference, ResourceKind::Script)),
         )
+        .chain(
+            resources
+                .fonts
+                .into_iter()
+                .take(web_content_process::MAX_FONTS)
+                .map(|reference| (reference, ResourceKind::Font)),
+        )
         .collect();
     if requests.is_empty() {
         return Assets::default();
@@ -295,6 +302,23 @@ fn fetch_assets(network: &NetworkStack, document: &Url, resources: Resources) ->
                         ResourceKind::Script if script_media_type(response.media_type()) => {
                             assets.scripts.push((reference.clone(), response.text()));
                         }
+                        ResourceKind::Font
+                            if matches!(
+                                response.media_type(),
+                                "font/ttf"
+                                    | "font/otf"
+                                    | "font/woff"
+                                    | "font/woff2"
+                                    | "application/font-woff"
+                                    | "application/x-font-ttf"
+                                    | "application/x-font-truetype"
+                                    | "application/x-font-opentype"
+                                    | "application/octet-stream"
+                                    | ""
+                            ) =>
+                        {
+                            assets.fonts.push((reference.clone(), response.bytes));
+                        }
                         _ => {}
                     }
                 }
@@ -307,6 +331,7 @@ fn fetch_assets(network: &NetworkStack, document: &Url, resources: Resources) ->
             loaded.stylesheets.extend(assets.stylesheets);
             loaded.images.extend(assets.images);
             loaded.scripts.extend(assets.scripts);
+            loaded.fonts.extend(assets.fonts);
         }
         let mut seen: HashSet<String> = loaded.scripts.iter().map(|(key, _)| key.clone()).collect();
         for _ in 0..4 {

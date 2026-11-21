@@ -6,7 +6,8 @@ use std::{
 };
 
 use display_list::{
-    Color, Command, DisplayList, Rect, TextMeasurer, TextMetrics, TextRange, TextRun, TextStyle,
+    Color, Command, DisplayList, FontFamily, Rect, TextMeasurer, TextMetrics, TextRange, TextRun,
+    TextStyle,
 };
 
 const ABI_VERSION: u32 = 3;
@@ -144,6 +145,13 @@ unsafe extern "C" {
     fn browser_renderer_read_pixel(renderer: *mut c_void, x: u32, y: u32, pixel: *mut u32) -> i32;
     fn browser_renderer_destroy(renderer: *mut c_void);
     fn browser_text_factory_create(result: *mut *mut c_void) -> i32;
+    fn browser_text_factory_register_font(
+        factory: *mut c_void,
+        data: *const u8,
+        length: u32,
+        family_name: *const u16,
+        font_id: *mut u32,
+    ) -> i32;
     fn browser_text_factory_destroy(factory: *mut c_void);
     fn browser_text_layout_create(
         factory: *mut c_void,
@@ -193,6 +201,29 @@ impl TextFactory {
             factory: self,
             layouts: Vec::new(),
         }
+    }
+
+    pub fn register_font(&mut self, data: &[u8], family: &str) -> Result<FontFamily, String> {
+        let family_u16: Vec<u16> = family.encode_utf16().chain(std::iter::once(0)).collect();
+        let length = u32::try_from(data.len()).map_err(|_| "The font data is too large.")?;
+        let mut font_id = 0u32;
+        check(
+            unsafe {
+                browser_text_factory_register_font(
+                    self.0.as_ptr(),
+                    if data.is_empty() {
+                        ptr::null()
+                    } else {
+                        data.as_ptr()
+                    },
+                    length,
+                    family_u16.as_ptr(),
+                    &mut font_id,
+                )
+            },
+            "Register font",
+        )?;
+        Ok(FontFamily(font_id))
     }
 }
 
@@ -666,5 +697,44 @@ mod tests {
         assert_eq!(renderer.read_pixel(125, 105).unwrap() & 0xffffff, 0x143845);
         assert_eq!(renderer.read_pixel(141, 105).unwrap() & 0xffffff, 0x89ffe6);
         assert_eq!(renderer.read_pixel(25, 25).unwrap() & 0xffffff, 0);
+    }
+
+    #[test]
+    fn registers_custom_font_family() {
+        let mut factory = TextFactory::new().unwrap();
+        let font_id = factory.register_font(&[], "Arial").unwrap();
+        assert_eq!(font_id, FontFamily::custom(0));
+        let second_id = factory.register_font(&[], "Segoe UI").unwrap();
+        assert_eq!(second_id, FontFamily::custom(1));
+
+        let mut batch = factory.batch();
+        let metrics = batch
+            .measure_styled(
+                "Hello Custom Font",
+                TextStyle {
+                    size: 14.0,
+                    weight: 400,
+                    align: TextAlign::Start,
+                },
+                200.0,
+                &[],
+                &[TextRun {
+                    range: TextRange {
+                        start: 0,
+                        length: 17,
+                    },
+                    color: Color::rgb(0),
+                    size: 14.0,
+                    weight: 400,
+                    family: font_id,
+                    italic: 0,
+                    underline: 0,
+                    strikethrough: 0,
+                }],
+                false,
+            )
+            .unwrap();
+        assert!(metrics.width > 0.0);
+        assert!(metrics.height > 0.0);
     }
 }

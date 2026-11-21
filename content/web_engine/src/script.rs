@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -20,6 +21,9 @@ thread_local! {
     static PAGE: RefCell<Option<Rc<RefCell<Page>>>> = const { RefCell::new(None) };
 }
 
+pub type FetchHandler =
+    Arc<dyn Fn(&str, &str, &str) -> Result<(u16, String, String), String> + Send + Sync>;
+
 struct Page {
     document: Document,
     sources: HashMap<String, String>,
@@ -27,6 +31,9 @@ struct Page {
     tasks: Vec<Persistent<Function<'static>>>,
     executed: HashSet<NodeId>,
     errors: Vec<String>,
+    console_logs: Vec<(String, String)>,
+    storage: HashMap<String, String>,
+    fetch_handler: Option<FetchHandler>,
 }
 
 impl Drop for ScriptSession {
@@ -66,6 +73,9 @@ impl ScriptSession {
             tasks: Vec::new(),
             executed: HashSet::new(),
             errors: Vec::new(),
+            console_logs: Vec::new(),
+            storage: HashMap::new(),
+            fetch_handler: None,
         }));
         let session = Self {
             runtime,
@@ -75,6 +85,28 @@ impl ScriptSession {
         };
         session.install_host()?;
         Ok(session)
+    }
+
+    pub fn console_logs(&self) -> Vec<(String, String)> {
+        self.page.borrow().console_logs.clone()
+    }
+
+    pub fn clear_console_logs(&mut self) {
+        self.page.borrow_mut().console_logs.clear();
+    }
+
+    pub fn storage(&self) -> HashMap<String, String> {
+        self.page.borrow().storage.clone()
+    }
+
+    pub fn set_fetch_handler(
+        &mut self,
+        handler: impl Fn(&str, &str, &str) -> Result<(u16, String, String), String>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.page.borrow_mut().fetch_handler = Some(Arc::new(handler));
     }
 
     pub fn requested_scripts(&self) -> Vec<String> {
@@ -142,7 +174,7 @@ impl ScriptSession {
                 if let Err(error) = function.call::<_, rquickjs::Value>((event,)) {
                     self.page.borrow_mut().errors.push(explain(&ctx, error));
                 }
-                drain_tasks(&ctx, &mut self.page.borrow_mut());
+                drain_tasks(&ctx, &self.page);
             }
             Ok(())
         })?;
@@ -211,7 +243,7 @@ impl ScriptSession {
                     } else if let Err(error) = ctx.eval::<(), _>(prepared.code) {
                         self.page.borrow_mut().errors.push(explain(&ctx, error));
                     } else {
-                        drain_tasks(&ctx, &mut self.page.borrow_mut());
+                        drain_tasks(&ctx, &self.page);
                     }
                 }
                 for module in &modules {
@@ -224,7 +256,7 @@ impl ScriptSession {
                     if let Err(error) = ctx.eval::<(), _>(load) {
                         self.page.borrow_mut().errors.push(explain(&ctx, error));
                     } else {
-                        drain_tasks(&ctx, &mut self.page.borrow_mut());
+                        drain_tasks(&ctx, &self.page);
                     }
                 }
             }
@@ -529,6 +561,73 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
     )
     .map_err(|error| error.to_string())?;
     let later = Function::new(ctx.clone(), later).map_err(|error| error.to_string())?;
+    let log = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, level: String, message: String| -> rquickjs::Result<()> {
+            with_host(&ctx, |page| {
+                if page.console_logs.len() < 1000 {
+                    page.console_logs.push((level, message));
+                }
+                Ok(())
+            })
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let storage_get = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, key: String| -> rquickjs::Result<Option<String>> {
+            with_host(&ctx, |page| Ok(page.storage.get(&key).cloned()))
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let storage_set = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, key: String, value: String| -> rquickjs::Result<()> {
+            with_host(&ctx, |page| {
+                if page.storage.len() < 10_000
+                    && key.len() <= 1024
+                    && value.len() <= 1024 * 1024
+                {
+                    page.storage.insert(key, value);
+                }
+                Ok(())
+            })
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let storage_remove = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, key: String| -> rquickjs::Result<()> {
+            with_host(&ctx, |page| {
+                page.storage.remove(&key);
+                Ok(())
+            })
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let storage_clear = Function::new(ctx.clone(), |ctx: Ctx<'_>| -> rquickjs::Result<()> {
+        with_host(&ctx, |page| {
+            page.storage.clear();
+            Ok(())
+        })
+    })
+    .map_err(|error| error.to_string())?;
+    let storage_key = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, index: u32| -> rquickjs::Result<Option<String>> {
+            with_host(&ctx, |page| {
+                let mut keys: Vec<&String> = page.storage.keys().collect();
+                keys.sort();
+                Ok(keys.get(index as usize).map(|s| (*s).clone()))
+            })
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let storage_length = Function::new(ctx.clone(), |ctx: Ctx<'_>| -> rquickjs::Result<u32> {
+        with_host(&ctx, |page| Ok(page.storage.len() as u32))
+    })
+    .map_err(|error| error.to_string())?;
+    let fetch = Function::new(ctx.clone(), fetch_host).map_err(|error| error.to_string())?;
     host.set("byId", by_id).map_err(|error| error.to_string())?;
     host.set("query", query)
         .map_err(|error| error.to_string())?;
@@ -568,6 +667,20 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
     host.set("tag", tag).map_err(|error| error.to_string())?;
     host.set("later", later)
         .map_err(|error| error.to_string())?;
+    host.set("log", log).map_err(|error| error.to_string())?;
+    host.set("storageGet", storage_get)
+        .map_err(|error| error.to_string())?;
+    host.set("storageSet", storage_set)
+        .map_err(|error| error.to_string())?;
+    host.set("storageRemove", storage_remove)
+        .map_err(|error| error.to_string())?;
+    host.set("storageClear", storage_clear)
+        .map_err(|error| error.to_string())?;
+    host.set("storageKey", storage_key)
+        .map_err(|error| error.to_string())?;
+    host.set("storageLength", storage_length)
+        .map_err(|error| error.to_string())?;
+    host.set("fetch", fetch).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -596,19 +709,66 @@ fn later<'js>(ctx: Ctx<'js>, callback: Function<'js>) -> rquickjs::Result<()> {
     })
 }
 
-fn drain_tasks(ctx: &Ctx<'_>, page: &mut Page) {
-    for _ in 0..MAX_TASKS {
-        if page.tasks.is_empty() {
-            break;
+fn fetch_host<'js>(
+    ctx: Ctx<'js>,
+    url: String,
+    method: String,
+    body: String,
+    callback: Function<'js>,
+) -> rquickjs::Result<()> {
+    let handler = with_host(&ctx, |page| Ok(page.fetch_handler.clone()))?;
+    let result = match &handler {
+        Some(h) => h(&url, &method, &body),
+        None => Ok((200, "OK".to_string(), String::new())),
+    };
+    let saved_callback = Persistent::save(&ctx, callback);
+    let (err, status, status_text, res_body) = match result {
+        Ok((st, st_text, b)) => (None, st, st_text, b),
+        Err(e) => (Some(e), 0u16, String::new(), String::new()),
+    };
+    let task = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'_>| -> rquickjs::Result<()> {
+            if let Ok(func) = saved_callback.clone().restore(&ctx) {
+                let _ = func.call::<_, rquickjs::Value>((
+                    err.clone(),
+                    status,
+                    status_text.clone(),
+                    res_body.clone(),
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    let saved_task = Persistent::save(&ctx, task);
+    with_host(&ctx, |page| {
+        if page.tasks.len() < MAX_TASKS {
+            page.tasks.push(saved_task);
         }
-        let task = page.tasks.remove(0);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn drain_tasks(ctx: &Ctx<'_>, page_cell: &RefCell<Page>) {
+    for _ in 0..MAX_TASKS {
+        while ctx.execute_pending_job() {}
+        let task = {
+            let mut page = page_cell.borrow_mut();
+            if page.tasks.is_empty() {
+                break;
+            }
+            page.tasks.remove(0)
+        };
         let Ok(function) = task.restore(ctx) else {
             continue;
         };
         if let Err(error) = function.call::<_, rquickjs::Value>(()) {
-            page.errors.push(explain(ctx, error));
+            page_cell.borrow_mut().errors.push(explain(ctx, error));
         }
+        while ctx.execute_pending_job() {}
     }
+    while ctx.execute_pending_job() {}
 }
 
 fn ancestor_chain(document: &Document, node: NodeId) -> Vec<NodeId> {
@@ -757,7 +917,148 @@ const BOOTSTRAP: &str = r#"
     set title(value) { __host.setTitle(String(value)); },
     addEventListener(type, fn) { this.documentElement.addEventListener(type, fn); }
   };
-  globalThis.console = { log() {}, warn() {}, error() {}, info() {}, debug() {} };
+  function __formatArg(arg) {
+    if (typeof arg === "string") return arg;
+    if (typeof arg === "number" || typeof arg === "boolean" || typeof arg === "undefined" || arg === null) {
+      return String(arg);
+    }
+    if (typeof arg === "symbol") return arg.toString();
+    try {
+      return JSON.stringify(arg);
+    } catch (_) {
+      return String(arg);
+    }
+  }
+  function __formatArgs(args) {
+    return args.map(__formatArg).join(" ");
+  }
+  globalThis.console = {
+    log(...args) { __host.log("log", __formatArgs(args)); },
+    warn(...args) { __host.log("warn", __formatArgs(args)); },
+    error(...args) { __host.log("error", __formatArgs(args)); },
+    info(...args) { __host.log("info", __formatArgs(args)); },
+    debug(...args) { __host.log("debug", __formatArgs(args)); }
+  };
+  function __createStorage(hostBacked) {
+    const memory = hostBacked ? null : new Map();
+    const storage = {
+      getItem(key) {
+        key = String(key);
+        if (hostBacked) {
+          const val = __host.storageGet(key);
+          return (val === undefined || val === null) ? null : String(val);
+        }
+        return memory.has(key) ? memory.get(key) : null;
+      },
+      setItem(key, value) {
+        key = String(key);
+        value = String(value);
+        if (hostBacked) {
+          __host.storageSet(key, value);
+        } else {
+          memory.set(key, value);
+        }
+      },
+      removeItem(key) {
+        key = String(key);
+        if (hostBacked) {
+          __host.storageRemove(key);
+        } else {
+          memory.delete(key);
+        }
+      },
+      clear() {
+        if (hostBacked) {
+          __host.storageClear();
+        } else {
+          memory.clear();
+        }
+      },
+      key(index) {
+        index = Number(index) >>> 0;
+        if (hostBacked) {
+          const k = __host.storageKey(index);
+          return (k === undefined || k === null) ? null : String(k);
+        }
+        const keys = Array.from(memory.keys());
+        return index < keys.length ? keys[index] : null;
+      },
+      get length() {
+        if (hostBacked) {
+          return __host.storageLength();
+        }
+        return memory.size;
+      }
+    };
+    return new Proxy(storage, {
+      get(target, prop) {
+        if (prop in target || typeof prop === "symbol") {
+          return target[prop];
+        }
+        return target.getItem(prop);
+      },
+      set(target, prop, value) {
+        if (prop in target) {
+          target[prop] = value;
+          return true;
+        }
+        target.setItem(prop, value);
+        return true;
+      },
+      deleteProperty(target, prop) {
+        if (prop in target) {
+          delete target[prop];
+          return true;
+        }
+        target.removeItem(prop);
+        return true;
+      }
+    });
+  }
+  globalThis.localStorage = __createStorage(true);
+  globalThis.sessionStorage = __createStorage(false);
+  globalThis.fetch = function (input, init) {
+    let url = typeof input === "string" ? input : (input && input.url ? String(input.url) : String(input));
+    let method = "GET";
+    let body = "";
+    if (init && typeof init === "object") {
+      if (init.method) method = String(init.method).toUpperCase();
+      if (init.body !== undefined && init.body !== null) {
+        body = typeof init.body === "string" ? init.body : JSON.stringify(init.body);
+      }
+    } else if (typeof input === "object" && input !== null) {
+      if (input.method) method = String(input.method).toUpperCase();
+      if (input.body !== undefined && input.body !== null) {
+        body = typeof input.body === "string" ? input.body : JSON.stringify(input.body);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      __host.fetch(url, method, body, function (err, status, statusText, resBody) {
+        if (err) {
+          reject(new Error(String(err)));
+          return;
+        }
+        const st = Number(status);
+        const response = {
+          ok: st >= 200 && st <= 299,
+          status: st,
+          statusText: String(statusText || ""),
+          url: url,
+          text() {
+            return Promise.resolve(String(resBody !== undefined && resBody !== null ? resBody : ""));
+          },
+          json() {
+            try {
+              return Promise.resolve(JSON.parse(resBody));
+            } catch (e) {
+              return Promise.reject(e);
+            }
+          }
+        };
+        resolve(response);
+      });
+    });
+  };
   globalThis.setTimeout = function (fn) { if (typeof fn === "function") __host.later(fn); return 0; };
   globalThis.clearTimeout = function () {};
   globalThis.requestAnimationFrame = function (fn) { if (typeof fn === "function") __host.later(fn); return 0; };
@@ -1471,6 +1772,264 @@ mod tests {
         layout(&session.document(), 640.0, &mut capture, |_| None, None).unwrap();
         assert!(capture.0.contains("Clicked"), "{}", capture.0);
         let _ = parse_html("<p></p>");
+    }
+
+    #[test]
+    fn test_console_logs_all_levels_and_serializes_args() {
+        let mut session = ScriptSession::open(
+            r#"
+            <script>
+                console.log("hello", 123);
+                console.warn("warning message");
+                console.error("error occurred:", { code: 500 });
+                console.info("info text");
+                console.debug("debug value", true, null);
+            </script>
+            "#,
+        )
+        .unwrap();
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let logs = session.console_logs();
+        assert_eq!(logs.len(), 5);
+        assert_eq!(logs[0], ("log".to_string(), "hello 123".to_string()));
+        assert_eq!(logs[1], ("warn".to_string(), "warning message".to_string()));
+        assert_eq!(
+            logs[2],
+            ("error".to_string(), "error occurred: {\"code\":500}".to_string())
+        );
+        assert_eq!(logs[3], ("info".to_string(), "info text".to_string()));
+        assert_eq!(
+            logs[4],
+            ("debug".to_string(), "debug value true null".to_string())
+        );
+    }
+
+    #[test]
+    fn test_local_storage_and_session_storage() {
+        let mut session = ScriptSession::open(
+            r#"
+            <script>
+                // Test basic localStorage methods
+                localStorage.setItem("foo", "bar");
+                if (localStorage.getItem("foo") !== "bar") throw new Error("getItem foo failed");
+                if (localStorage.length !== 1) throw new Error("length should be 1");
+                if (localStorage.key(0) !== "foo") throw new Error("key(0) should be foo");
+
+                // Test removeItem
+                localStorage.removeItem("foo");
+                if (localStorage.getItem("foo") !== null) throw new Error("getItem after remove should be null");
+                if (localStorage.length !== 0) throw new Error("length should be 0 after remove");
+
+                // Test property access and multiple keys
+                localStorage.setItem("alpha", "1");
+                localStorage.setItem("beta", "2");
+                if (localStorage.alpha !== "1") throw new Error("alpha prop failed");
+                if (localStorage["beta"] !== "2") throw new Error("beta prop failed");
+                if (localStorage.length !== 2) throw new Error("length should be 2");
+
+                // Test clear
+                localStorage.clear();
+                if (localStorage.length !== 0) throw new Error("clear failed");
+
+                // Test sessionStorage independence
+                sessionStorage.setItem("sess", "active");
+                if (sessionStorage.getItem("sess") !== "active") throw new Error("sessionStorage failed");
+                if (localStorage.getItem("sess") !== null) throw new Error("localStorage should not have sess");
+            </script>
+            "#,
+        )
+        .unwrap();
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+
+        // Check storage inspection on ScriptSession
+        let mut session2 = ScriptSession::open(
+            r#"
+            <script>
+                localStorage.setItem("persisted", "value123");
+            </script>
+            "#,
+        )
+        .unwrap();
+        session2
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session2.failure().is_none(), "{:?}", session2.failure());
+        assert_eq!(
+            session2.storage().get("persisted"),
+            Some(&"value123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fetch_resolves_json_and_text() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="result"></div>
+            <script>
+                (async () => {
+                    const res = await fetch("https://example.com/api/data");
+                    if (!res.ok) throw new Error("not ok: " + res.status);
+                    if (res.status !== 200) throw new Error("status: " + res.status);
+                    if (res.statusText !== "OK") throw new Error("statusText: " + res.statusText);
+                    if (res.url !== "https://example.com/api/data") throw new Error("url: " + res.url);
+                    const data = await res.json();
+                    document.getElementById("result").textContent = data.greeting + " " + data.count;
+                })();
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session.set_fetch_handler(|url, method, body| {
+            assert_eq!(url, "https://example.com/api/data");
+            assert_eq!(method, "GET");
+            assert_eq!(body, "");
+            Ok((
+                200,
+                "OK".to_string(),
+                r#"{"greeting":"hello","count":42}"#.to_string(),
+            ))
+        });
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let res_node = session.document().element_by_id("result").unwrap();
+        assert_eq!(session.document().text_of(res_node), "hello 42");
+    }
+
+    #[test]
+    fn test_fetch_with_then_promise_chain() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="result"></div>
+            <script>
+                fetch("https://example.com/api/items")
+                    .then(r => r.json())
+                    .then(data => {
+                        document.getElementById("result").textContent = data.items.join(",");
+                    });
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session.set_fetch_handler(|url, method, _| {
+            assert_eq!(url, "https://example.com/api/items");
+            assert_eq!(method, "GET");
+            Ok((
+                200,
+                "OK".to_string(),
+                r#"{"items":["apple","banana","cherry"]}"#.to_string(),
+            ))
+        });
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let res_node = session.document().element_by_id("result").unwrap();
+        assert_eq!(session.document().text_of(res_node), "apple,banana,cherry");
+    }
+
+    #[test]
+    fn test_fetch_post_method_and_body() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="result"></div>
+            <script>
+                (async () => {
+                    const res = await fetch("https://example.com/api/create", {
+                        method: "POST",
+                        body: JSON.stringify({ name: "item1" })
+                    });
+                    const text = await res.text();
+                    document.getElementById("result").textContent = text;
+                })();
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session.set_fetch_handler(|url, method, body| {
+            assert_eq!(url, "https://example.com/api/create");
+            assert_eq!(method, "POST");
+            assert_eq!(body, r#"{"name":"item1"}"#);
+            Ok((
+                201,
+                "Created".to_string(),
+                "Item created successfully".to_string(),
+            ))
+        });
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let res_node = session.document().element_by_id("result").unwrap();
+        assert_eq!(
+            session.document().text_of(res_node),
+            "Item created successfully"
+        );
+    }
+
+    #[test]
+    fn test_fetch_network_error_rejection() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="result"></div>
+            <script>
+                fetch("https://example.com/api/broken")
+                    .then(() => {
+                        document.getElementById("result").textContent = "unexpected-success";
+                    })
+                    .catch(err => {
+                        document.getElementById("result").textContent = "caught: " + err.message;
+                    });
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session.set_fetch_handler(|_, _, _| Err("Connection refused".to_string()));
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let res_node = session.document().element_by_id("result").unwrap();
+        assert_eq!(
+            session.document().text_of(res_node),
+            "caught: Connection refused"
+        );
     }
 
     #[test]

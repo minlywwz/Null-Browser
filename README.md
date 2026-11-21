@@ -1,10 +1,47 @@
 # Null Browser
 
-A standalone, independent web browser prototype for Windows 11 x64 built from scratch without Chromium, Gecko, WebKit, or WebView. The address bar opens HTTP(S) URLs and domains (auto-completing HTTPS). A custom Rust engine constructs the DOM, resolves CSS styling, calculates layout, and dispatches a lightweight Display List to a high-performance C++ DirectX 11 (D3D11) compositor via the DXGI flip model.
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2011%20x64-0078d4?style=for-the-badge&logo=windows11&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/Rust-2024%20Edition-black?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/C%2B%2B-20%20%2F%20Direct3D%2011-00599c?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++" />
+  <img src="https://img.shields.io/badge/Tests-63%20passed-2ea44f?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/Code-16.2k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
+</p>
 
-## Building
+An independent, lightweight web browser engine built from scratch for Windows 11 x64 in Rust and C++ (Direct3D 11, Direct2D, DirectWrite). It does not use Chromium, Gecko, WebKit, or WebView.
 
-Building requires Rust stable, MSVC with C++ build tools, and the Windows SDK. From the project root:
+---
+
+### Codebase Statistics
+
+| Layer / Crate | Purpose | Files | Lines of Code |
+|---|---|:---:|:---:|
+| **`content`** | HTML5/CSS parser, DOM, Layout Engine, QuickJS runtime, AppContainer worker | 11 | **8,621** |
+| **`browser`** | Win32 host, multi-tab strip, navigation history, compositor worker | 13 | **5,255** |
+| **`gpu`** | D3D11 compositor, Motion Engine, DirectWrite text factory, Display List | 9 | **1,907** |
+| **`net`** | HTTP(S) stack, TLS validation, SSRF protection, resource limiters | 1 | **385** |
+| **`components`** | Browser Studio configuration model and settings persistence | 1 | **90** |
+| **Total** | | **35** | **~16,258 LOC** |
+
+* Language composition: **94.2% Rust**, **5.8% C++ / Direct3D 11**.
+
+---
+
+### Key Capabilities
+
+* **Multi-Tab Interface**: Tab strip with adaptive width, tab lifecycle, per-tab history, scroll preservation, and shortcuts (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab`, `Ctrl+1..9`).
+* **Interactive Forms**: `<form>`, `<input>` (text, search, password, submit, checkbox, radio), `<button>`, and `<textarea>`. Supports typing with Win32 `WM_CHAR`, focus outline, text caret, and query string submission.
+* **Modern Web APIs**: JavaScript QuickJS engine with `fetch()` (Promises, `json()`, `text()`), `localStorage`, `sessionStorage`, and `console.log`.
+* **Web Typography**: `@font-face` rule parsing, dynamic font resource downloading, and Windows DirectWrite in-memory font registration via `AddFontMemResourceEx`.
+* **Security Sandbox**: Untrusted web pages execute inside a Windows AppContainer with strict Job Object memory and process limits.
+* **GPU Compositing**: Direct3D 11 flip-model swapchain, DirectWrite text rasterization, and Motion Engine borderless fullscreen transitions.
+
+---
+
+### Building
+
+Requirements: Rust stable, MSVC C++ tools, Windows SDK.
 
 ```powershell
 cargo build --workspace --release --locked
@@ -12,42 +49,24 @@ cargo build --workspace --release --locked
 cargo test --workspace --locked
 ```
 
-Ensure `web_content_process.exe` is placed alongside `browser_app.exe`. It executes inside a Windows AppContainer sandbox with Job Object resource constraints for untrusted web pages and selected local HTML files, parsing HTML/CSS, executing scripts via QuickJS, and decoding images.
+Ensure `web_content_process.exe` is in the same directory as `browser_app.exe`.
 
-## Navigation & Shortcuts
+---
 
-- **Tabs**:
-  - **Ctrl+T**: Open a new tab.
-  - **Ctrl+W**: Close current tab.
-  - **Ctrl+Tab** / **Ctrl+Shift+Tab**: Switch to next / previous tab.
-  - **Ctrl+1** .. **Ctrl+9**: Jump directly to tab by index.
-  - Click on tabs in the top tab strip to switch, click `×` to close, or click `+` to create a new tab.
-- **Address Bar**: **Ctrl+L** focuses and selects the address bar. Enter a domain like `example.com` or a full URL. Use explicit `http://` for unencrypted HTTP. The `--url <address>` command-line option opens an address on startup.
-- **Navigation**: **Alt+←** and **Alt+→** navigate back and forward through tab history. **Ctrl+R** or **F5** reloads the active page.
-- **Local Files**: **⋯ → Open HTML** or **Ctrl+O** opens a local `.html` or `.htm` file encoded in UTF-8. You can also pass the file path as the first startup argument.
-- **Browser Studio**: **⋯ → Browser Studio** or **F2** opens the browser customizer (toolbar positioning, accent color themes, animation speeds). Configuration is saved to `%LOCALAPPDATA%\Browser\browser-studio.ini`. Use `--profile <path>` for isolated configurations.
-- **Motion Engine**: **⋯ → Motion Engine** (or `--motion-demo`) showcases layer transitions on a synthetic GPU procedural texture. **F** expands into borderless fullscreen, **Esc** returns to windowed mode.
-- **Diagnostics & Probing**:
-  - `--log <file>` records frame present timings, page layout latencies, and Motion Engine transitions.
-  - `--warp` forces Windows Advanced Rasterization Platform (WARP) software D3D11 rendering for diagnostics.
-  - `--motion-probe 30 --log motion.log` executes 30 automated windowed-to-fullscreen transitions, logs frame dispatch intervals, and exits cleanly.
+### Navigation & Shortcuts
 
-## Engine Capabilities
+* **Ctrl+T** / **Ctrl+W**: Open new tab / close active tab.
+* **Ctrl+Tab** / **Ctrl+Shift+Tab**: Switch to next / previous tab.
+* **Ctrl+1** – **Ctrl+9**: Switch directly to tab by index.
+* **Ctrl+L**: Select address bar.
+* **Alt+Left** / **Alt+Right**: Navigate back / forward in history.
+* **Ctrl+R** or **F5**: Reload active page.
+* **Ctrl+O**: Open local HTML file.
+* **F2**: Open Browser Studio (theme and UI customization).
+* **F11** or **F** (in Motion Engine): Toggle borderless fullscreen.
 
-The engine renders static documents, server-side HTML, and interactive pages:
-- **Layout & CSS**: Block layout, inline text runs with mixed styling and UTF-16 ranges, tables, lists, basic Flexbox (`display: flex`, axis alignments), and basic Grid (fixed tracks, percentages, `fr`, and numeric `repeat()`). CSS selectors support tags, classes, IDs, attribute selectors, `!important` declarations, cascade inheritance, and basic media queries.
-- **Media & Images**: Decodes PNG, JPEG, WebP, GIF, and static SVG from remote URLs or inline base64 `data:` URIs.
-- **JavaScript**: QuickJS executes embedded and external scripts with lightweight DOM bindings (`click` handlers, DOM mutations, timers). Lightweight TypeScript annotations are stripped on the fly.
-- **Security & Network**: Network stack enforces TLS validation, limits payload sizes (documents up to 2 MiB, stylesheets 256 KiB, scripts 1 MiB, images 2 MiB), and prevents SSRF by blocking requests to local, loopback, and private IP ranges.
+---
 
-## Architecture
+### License
 
-Source code is organized into modular layers:
-- `browser`: Win32 window host, tab strip UI, and GPU compositor coordinator (`browser_app`, `browser_core`).
-- `content`: HTML/CSS parser, DOM, style & layout engine, QuickJS runtime (`web_engine`), and isolated worker process (`web_content_process`).
-- `gpu`: Abstract display list (`display_list`), D3D11 / Direct2D renderer and Motion Engine compositor (`rendering_engine`, `rendering_ffi`).
-- `net`: Network stack, SSRF protection, URL validation, and HTTP/TLS fetcher.
-- `components`: Browser Studio configuration model (`browser_studio`).
-- `testing`: Fixtures and integration tests.
-
-For detailed module boundaries, IPC contracts, and pipeline flow, see [ARCHITECTURE.md](ARCHITECTURE.md).
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

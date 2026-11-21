@@ -6,6 +6,7 @@ mod script;
 mod streamed_html;
 mod style_engine;
 
+pub use css_parser::{FontFace, parse_font_faces};
 pub use dom::{Document, NodeId};
 pub use html_parser::{MAX_HTML_BYTES, parse_html};
 pub use layout_engine::{

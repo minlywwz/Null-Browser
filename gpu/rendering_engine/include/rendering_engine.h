@@ -111,6 +111,9 @@ int32_t browser_renderer_read_pixel(BrowserRenderer* renderer, uint32_t x, uint3
 void browser_renderer_destroy(BrowserRenderer* renderer) BROWSER_NOEXCEPT;
 
 int32_t browser_text_factory_create(BrowserTextFactory** result) BROWSER_NOEXCEPT;
+int32_t browser_text_factory_register_font(BrowserTextFactory* factory,
+    const uint8_t* data, uint32_t length, const uint16_t* family_name,
+    uint32_t* font_id) BROWSER_NOEXCEPT;
 void browser_text_factory_destroy(BrowserTextFactory* factory) BROWSER_NOEXCEPT;
 int32_t browser_text_layout_create(BrowserTextFactory* factory,
     const uint16_t* text, uint32_t length, const BrowserTextOptions* options,

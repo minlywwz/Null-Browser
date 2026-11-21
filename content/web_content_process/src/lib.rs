@@ -26,6 +26,7 @@ pub use protocol::{Assets, Pixels, Probe, Reply, Request, Resources, Snapshot, r
 pub const MAX_STYLESHEETS: usize = 8;
 pub const MAX_IMAGES: usize = 16;
 pub const MAX_SCRIPTS: usize = 24;
+pub const MAX_FONTS: usize = 16;
 const MAX_REFERENCE_BYTES: usize = 4096;
 const MAX_DATA_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_PIXEL_BYTES: usize = 24 * 1024 * 1024;
@@ -80,6 +81,10 @@ impl Worker {
                         MAX_IMAGES,
                     ),
                     scripts,
+                    fonts: references(
+                        document.external_fonts().filter(|src| !is_data_url(src)),
+                        MAX_FONTS,
+                    ),
                 };
                 drop(document);
                 self.session = Some(session);
@@ -180,6 +185,11 @@ impl Worker {
     fn install_assets(&mut self, assets: Assets) {
         if let Some(session) = self.session.as_mut() {
             session.install_scripts(assets.scripts);
+            for (_, css) in &assets.stylesheets {
+                for face in web_engine::parse_font_faces(css) {
+                    session.document_mut().add_font_face(face);
+                }
+            }
         }
         self.stylesheets = assets
             .stylesheets

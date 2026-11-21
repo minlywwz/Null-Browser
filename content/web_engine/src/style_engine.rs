@@ -7,7 +7,7 @@ use crate::{
     css_parser::{
         AlignItems, Compound, Declaration, Display, GridColumns, JustifyContent, Length,
         MAX_STYLESHEET_BYTES, Position, Rule, Selector, WhiteSpace, parse_inline, parse_selector,
-        parse_stylesheet,
+        parse_stylesheet_with_fonts,
     },
     dom::{Document, Kind, Node, NodeId},
 };
@@ -255,7 +255,7 @@ impl Style {
         }
         let inline = node
             .attr("style")
-            .map(|inline| parse_inline(inline, tokens));
+            .map(|inline| parse_inline(inline, tokens, document.font_faces()));
         let mut important = Vec::new();
         for declaration in rules
             .iter()
@@ -503,7 +503,7 @@ pub(crate) fn compute_styles(
             source.push('\n');
         }
     }
-    let (rules, tokens) = parse_stylesheet(&source, viewport)?;
+    let (rules, tokens) = parse_stylesheet_with_fonts(&source, viewport, document.font_faces())?;
     let mut styles = vec![Style::default(); document.nodes.len()];
     let mut next_number = vec![None; document.nodes.len()];
     for id in document.tree_order() {

@@ -59,6 +59,7 @@ pub struct Resources {
     pub stylesheets: Vec<String>,
     pub images: Vec<String>,
     pub scripts: Vec<String>,
+    pub fonts: Vec<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ pub struct Assets {
     pub stylesheets: Vec<(String, String)>,
     pub images: Vec<(String, Vec<u8>)>,
     pub scripts: Vec<(String, String)>,
+    pub fonts: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

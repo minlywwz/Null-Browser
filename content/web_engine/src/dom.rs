@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::css_parser::FontFace;
+
 pub type NodeId = usize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,11 +52,51 @@ pub struct Document {
     pub(crate) title: String,
     pub(crate) scripting: bool,
     pub(crate) clickable: HashSet<NodeId>,
+    pub(crate) font_faces: Vec<FontFace>,
 }
 
 impl Document {
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn font_faces(&self) -> &[FontFace] {
+        &self.font_faces
+    }
+
+    pub fn external_fonts(&self) -> impl Iterator<Item = &str> {
+        self.font_faces.iter().map(|face| face.src.as_str())
+    }
+
+    pub fn add_font_face(&mut self, font_face: FontFace) {
+        if !self
+            .font_faces
+            .iter()
+            .any(|f| f.family.eq_ignore_ascii_case(&font_face.family) && f.src == font_face.src)
+        {
+            self.font_faces.push(font_face);
+        }
+    }
+
+    pub(crate) fn collect_font_faces(&mut self) {
+        let mut faces = Vec::new();
+        for id in &self.stylesheets {
+            let node = &self.nodes[*id];
+            if node.name() == "style" {
+                for child_id in &node.children {
+                    if let Kind::Text(css) = &self.nodes[*child_id].kind {
+                        for face in crate::css_parser::parse_font_faces(css) {
+                            if !faces.iter().any(|f: &FontFace| {
+                                f.family.eq_ignore_ascii_case(&face.family) && f.src == face.src
+                            }) {
+                                faces.push(face);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.font_faces = faces;
     }
 
     pub fn external_stylesheets(&self) -> impl Iterator<Item = &str> {

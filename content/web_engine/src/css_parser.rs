@@ -1,7 +1,85 @@
 use std::{collections::HashMap, sync::Arc};
 
+use serde::{Deserialize, Serialize};
+
 use crate::Viewport;
 use display_list::{Color, TextAlign};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FontFace {
+    pub family: String,
+    pub src: String,
+}
+
+pub fn parse_font_faces(source: &str) -> Vec<FontFace> {
+    if source.len() > MAX_STYLESHEET_BYTES {
+        return Vec::new();
+    }
+    let source = strip_comments(source);
+    let mut faces = Vec::new();
+    let mut rest = source.as_str();
+    while faces.len() < 64 && let Some((prelude, tail)) = rest.split_once('{') {
+        let Some(end) = matching_end(tail) else { break };
+        let prelude = prelude.rsplit(';').next().unwrap_or(prelude).trim();
+        let body = &tail[..end];
+        if prelude.eq_ignore_ascii_case("@font-face") {
+            let mut family = None;
+            let mut src = None;
+            for part in split_top_level(body, |c| c == ';').take(32) {
+                let Some((name, value)) = part.split_once(':') else { continue };
+                let name = name.trim().to_ascii_lowercase();
+                let value = value.trim();
+                match name.as_str() {
+                    "font-family" => {
+                        let fam = value.trim_matches(['\'', '"']).trim();
+                        if !fam.is_empty() {
+                            family = Some(fam.to_owned());
+                        }
+                    }
+                    "src" => {
+                        if let Some(url) = extract_font_url(value) {
+                            src = Some(url);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(family), Some(src)) = (family, src) {
+                if !faces
+                    .iter()
+                    .any(|f: &FontFace| f.family.eq_ignore_ascii_case(&family) && f.src == src)
+                {
+                    faces.push(FontFace { family, src });
+                }
+            }
+        }
+        rest = &tail[end + 1..];
+    }
+    faces
+}
+
+fn extract_font_url(value: &str) -> Option<String> {
+    if let Some(start) = value.find("url(") {
+        let rest = &value[start + 4..];
+        let end = matching_paren(rest.as_bytes(), 0).or_else(|| rest.find(')'))?;
+        let url = rest[..end].trim().trim_matches(['\'', '"']).trim();
+        if !url.is_empty() {
+            return Some(url.to_owned());
+        }
+    }
+    let clean = value
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(['\'', '"'])
+        .trim();
+    if !clean.is_empty()
+        && (clean.starts_with("http") || clean.contains('/') || clean.contains('.'))
+    {
+        return Some(clean.to_owned());
+    }
+    None
+}
 
 const MAX_RULES: usize = 8192;
 const MAX_CUSTOM_PROPERTIES: usize = 8192;
@@ -636,24 +714,48 @@ pub(crate) struct Declared {
     pub(crate) important: bool,
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_stylesheet(
     source: &str,
     viewport: Viewport,
+) -> Result<(Vec<Rule>, HashMap<String, String>), String> {
+    parse_stylesheet_with_fonts(source, viewport, &[])
+}
+
+pub(crate) fn parse_stylesheet_with_fonts(
+    source: &str,
+    viewport: Viewport,
+    known_fonts: &[FontFace],
 ) -> Result<(Vec<Rule>, HashMap<String, String>), String> {
     if source.len() > MAX_STYLESHEET_BYTES {
         return Err("The CSS exceeds the stylesheet size limit.".into());
     }
     let source = strip_comments(source);
+    let mut custom_fonts = known_fonts.to_vec();
+    for face in parse_font_faces(&source) {
+        if !custom_fonts
+            .iter()
+            .any(|f| f.family.eq_ignore_ascii_case(&face.family))
+        {
+            custom_fonts.push(face);
+        }
+    }
     let tokens = custom_properties(&source);
     let source = apply_tokens(&source, &tokens);
     let mut rules = Vec::new();
-    parse_rules(&source, viewport, 0, &mut rules);
+    parse_rules(&source, viewport, 0, &mut rules, &custom_fonts);
     // Stable sort leaves equal-specificity rules in source order.
     rules.sort_by_key(|rule| rule.selector.specificity);
     Ok((rules, tokens))
 }
 
-fn parse_rules(mut source: &str, viewport: Viewport, depth: usize, rules: &mut Vec<Rule>) {
+fn parse_rules(
+    mut source: &str,
+    viewport: Viewport,
+    depth: usize,
+    rules: &mut Vec<Rule>,
+    custom_fonts: &[FontFace],
+) {
     while rules.len() < MAX_RULES
         && let Some((prelude, tail)) = source.split_once('{')
     {
@@ -662,10 +764,10 @@ fn parse_rules(mut source: &str, viewport: Viewport, depth: usize, rules: &mut V
         let body = &tail[..end];
         if let Some(query) = prelude.strip_prefix("@media") {
             if depth < 4 && media_matches(query.trim(), viewport) {
-                parse_rules(body, viewport, depth + 1, rules);
+                parse_rules(body, viewport, depth + 1, rules, custom_fonts);
             }
         } else if !prelude.starts_with('@') && prelude.len() <= 4096 {
-            let declarations = parse_declarations(body);
+            let declarations = parse_declarations(body, custom_fonts);
             if !declarations.is_empty() {
                 let declarations: Arc<[Declared]> = declarations.into();
                 let remaining = MAX_RULES - rules.len();
@@ -1113,15 +1215,19 @@ fn box_sides<T: Copy>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<
         .then_some([top, right, bottom, left])
 }
 
-pub(crate) fn parse_inline(source: &str, tokens: &HashMap<String, String>) -> Vec<Declared> {
+pub(crate) fn parse_inline(
+    source: &str,
+    tokens: &HashMap<String, String>,
+    custom_fonts: &[FontFace],
+) -> Vec<Declared> {
     if source.len() > 4096 {
         return Vec::new();
     }
     let source = apply_tokens(&strip_comments(source), tokens);
-    parse_declarations(&source)
+    parse_declarations(&source, custom_fonts)
 }
 
-fn parse_declarations(source: &str) -> Vec<Declared> {
+fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> {
     use Declaration as D;
     use display_list::FontFamily;
     let mut declarations = Vec::new();
@@ -1228,17 +1334,26 @@ fn parse_declarations(source: &str) -> Vec<Declared> {
             "font-family" => {
                 value
                     .split(',')
-                    .find_map(|family| match family.trim().trim_matches(['\'', '"']) {
-                        "serif" | "times new roman" | "georgia" => {
-                            Some(D::FontFamily(FontFamily::Serif))
+                    .find_map(|family| {
+                        let name = family.trim().trim_matches(['\'', '"']).trim();
+                        if let Some(index) = custom_fonts
+                            .iter()
+                            .position(|face| face.family.eq_ignore_ascii_case(name))
+                        {
+                            return Some(D::FontFamily(FontFamily::custom(index as u32)));
                         }
-                        "monospace" | "consolas" | "courier" | "courier new" => {
-                            Some(D::FontFamily(FontFamily::Monospace))
+                        match name {
+                            "serif" | "times new roman" | "georgia" => {
+                                Some(D::FontFamily(FontFamily::Serif))
+                            }
+                            "monospace" | "consolas" | "courier" | "courier new" => {
+                                Some(D::FontFamily(FontFamily::Monospace))
+                            }
+                            "sans-serif" | "system-ui" | "segoe ui" | "arial" => {
+                                Some(D::FontFamily(FontFamily::SansSerif))
+                            }
+                            _ => None,
                         }
-                        "sans-serif" | "system-ui" | "segoe ui" | "arial" => {
-                            Some(D::FontFamily(FontFamily::SansSerif))
-                        }
-                        _ => None,
                     })
             }
             "font-style" if matches!(value, "normal" | "italic" | "oblique") => {
@@ -1345,4 +1460,94 @@ fn parse_declarations(source: &str) -> Vec<Declared> {
         }));
     }
     declarations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use display_list::FontFamily;
+
+    #[test]
+    fn parses_font_face_and_maps_custom_family() {
+        let css = r#"
+            @font-face {
+                font-family: 'Open Sans';
+                src: url('opensans.woff2');
+            }
+            @font-face {
+                font-family: "Robo-Font";
+                src: url("fonts/roboto.ttf") format("truetype");
+            }
+            h1 {
+                font-family: 'Open Sans', sans-serif;
+            }
+            p {
+                font-family: "Robo-Font", monospace;
+            }
+            code {
+                font-family: Consolas, monospace;
+            }
+        "#;
+        let faces = parse_font_faces(css);
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0].family, "Open Sans");
+        assert_eq!(faces[0].src, "opensans.woff2");
+        assert_eq!(faces[1].family, "Robo-Font");
+        assert_eq!(faces[1].src, "fonts/roboto.ttf");
+
+        let (rules, _) = parse_stylesheet(
+            css,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 3);
+
+        // Find rule for h1: font-family should be custom(0)
+        let h1_decl = rules
+            .iter()
+            .find(|r| r.selector.parts[0].tag.as_deref() == Some("h1"))
+            .unwrap();
+        let h1_family = h1_decl
+            .declarations
+            .iter()
+            .find_map(|d| match d.value {
+                Declaration::FontFamily(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(h1_family, FontFamily::custom(0));
+
+        // Find rule for p: font-family should be custom(1)
+        let p_decl = rules
+            .iter()
+            .find(|r| r.selector.parts[0].tag.as_deref() == Some("p"))
+            .unwrap();
+        let p_family = p_decl
+            .declarations
+            .iter()
+            .find_map(|d| match d.value {
+                Declaration::FontFamily(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(p_family, FontFamily::custom(1));
+
+        // Find rule for code: font-family should be Monospace
+        let code_decl = rules
+            .iter()
+            .find(|r| r.selector.parts[0].tag.as_deref() == Some("code"))
+            .unwrap();
+        let code_family = code_decl
+            .declarations
+            .iter()
+            .find_map(|d| match d.value {
+                Declaration::FontFamily(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(code_family, FontFamily::Monospace);
+    }
 }

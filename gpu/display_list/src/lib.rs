@@ -128,13 +128,23 @@ pub struct TextRange {
     pub length: u32,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u32)]
-pub enum FontFamily {
-    #[default]
-    SansSerif,
-    Serif,
-    Monospace,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct FontFamily(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl FontFamily {
+    pub const SansSerif: Self = Self(0);
+    pub const Serif: Self = Self(1);
+    pub const Monospace: Self = Self(2);
+
+    pub const fn custom(index: u32) -> Self {
+        Self(3 + index)
+    }
+
+    pub const fn id(self) -> u32 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -177,5 +187,21 @@ pub trait TextMeasurer {
         _wrap: bool,
     ) -> Result<TextMetrics, String> {
         self.measure(text, style, width, links)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_font_family_properties() {
+        assert_eq!(FontFamily::SansSerif.id(), 0);
+        assert_eq!(FontFamily::Serif.id(), 1);
+        assert_eq!(FontFamily::Monospace.id(), 2);
+        assert_eq!(FontFamily::custom(0).id(), 3);
+        assert_eq!(FontFamily::custom(1).id(), 4);
+        assert_eq!(FontFamily::custom(42).id(), 45);
+        assert_eq!(FontFamily::default(), FontFamily::SansSerif);
     }
 }
