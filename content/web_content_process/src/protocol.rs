@@ -22,6 +22,22 @@ pub enum Request {
         private_file: String,
         loopback_port: u16,
     },
+    FormInput {
+        node: u32,
+        value: String,
+        viewport: Viewport,
+    },
+    FormToggle {
+        node: u32,
+        viewport: Viewport,
+    },
+    FormRadio {
+        node: u32,
+        viewport: Viewport,
+    },
+    SubmitForm {
+        node: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +46,10 @@ pub enum Reply {
     Measure(Text),
     Page(Snapshot),
     Probe(Probe),
+    Submitted {
+        action: String,
+        query: String,
+    },
     Error(String),
 }
 

@@ -194,6 +194,13 @@ impl WebContentProcess {
         }
     }
 
+    pub fn submit_form(&self, node: u32) -> Option<(String, String)> {
+        match self.call(Request::SubmitForm { node }).ok()? {
+            Reply::Submitted { action, query } => Some((action, query)),
+            _ => None,
+        }
+    }
+
     pub(super) fn layout(&self, request: Request, generation: u32) -> Result<Scene, String> {
         match self.exchange(Operation::Layout {
             request,

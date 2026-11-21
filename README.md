@@ -1,8 +1,10 @@
 # Null Browser
 
-Прототип независимого браузера для Windows 11 x64. Адресная строка открывает HTTP(S) и домены, для которых браузер подставляет HTTPS. Собственный движок строит DOM, применяет CSS и отправляет Display List в рендерер C++ на D3D11.
+A standalone, independent web browser prototype for Windows 11 x64 built from scratch without Chromium, Gecko, WebKit, or WebView. The address bar opens HTTP(S) URLs and domains (auto-completing HTTPS). A custom Rust engine constructs the DOM, resolves CSS styling, calculates layout, and dispatches a lightweight Display List to a high-performance C++ DirectX 11 (D3D11) compositor via the DXGI flip model.
 
-Сборка требует Rust stable, MSVC с компонентами C++ и Windows SDK. Из корня проекта:
+## Building
+
+Building requires Rust stable, MSVC with C++ build tools, and the Windows SDK. From the project root:
 
 ```powershell
 cargo build --workspace --release --locked
@@ -10,18 +12,42 @@ cargo build --workspace --release --locked
 cargo test --workspace --locked
 ```
 
-Держите `web_content_process.exe` рядом с `browser_app.exe`. Он запускается в Windows AppContainer для сетевых страниц и выбранных локальных HTML-файлов, разбирает HTML и CSS, выполняет скрипты и декодирует изображения. Для локальных страниц доступны встроенные изображения.
+Ensure `web_content_process.exe` is placed alongside `browser_app.exe`. It executes inside a Windows AppContainer sandbox with Job Object resource constraints for untrusted web pages and selected local HTML files, parsing HTML/CSS, executing scripts via QuickJS, and decoding images.
 
-- **Ctrl+L** выделяет адрес. Введите, например, `example.com` и нажмите Enter. Для явного HTTP укажите `http://`. Параметр `--url example.com` открывает адрес при запуске.
-- **Alt+←** и **Alt+→** перемещаются по истории. **Ctrl+R** или **F5** обновляет страницу.
-- **⋯ → Open HTML** или **Ctrl+O** открывает локальный файл `.html` или `.htm` в UTF-8. Путь можно также передать первым аргументом.
-- **⋯ → Browser Studio** или **F2** открывает настройки. Они сохраняются в `%LOCALAPPDATA%\Browser\browser-studio.ini`. Параметр `--profile <папка>` задаёт отдельный профиль.
-- **⋯ → Motion Engine** открывает живую синтетическую текстуру. **F** разворачивает её в безрамочный fullscreen, **Esc** возвращает окно. Параметр `--motion-demo` сразу открывает этот экран.
-- Параметр `--log <файл>` записывает время первого Present, построения страниц и переходов Motion Engine. `--warp` включает программный D3D11 для диагностики.
-- `--motion-probe 30 --log motion.log` запускает 30 циклов входа и выхода из fullscreen на текущем мониторе, записывает интервалы отправки кадров и закрывает окно. Для отдельного запуска используйте `--profile <папка>`.
+## Navigation & Shortcuts
 
-Движок отображает статические страницы и серверный HTML. Поддерживаются таблицы и списки, блочная раскладка, базовые Flexbox и Grid, простые media queries, атрибутные селекторы, `!important` и стили текста внутри строки. Grid заполняет колонки по порядку и поддерживает фиксированные размеры, проценты, `fr` и числовой `repeat()`. Изображения PNG, JPEG, WebP, GIF и статический SVG можно загружать по URL или встраивать как base64 `data:`. Сетевой слой проверяет TLS и ограничивает объём ответов.
+- **Tabs**:
+  - **Ctrl+T**: Open a new tab.
+  - **Ctrl+W**: Close current tab.
+  - **Ctrl+Tab** / **Ctrl+Shift+Tab**: Switch to next / previous tab.
+  - **Ctrl+1** .. **Ctrl+9**: Jump directly to tab by index.
+  - Click on tabs in the top tab strip to switch, click `×` to close, or click `+` to create a new tab.
+- **Address Bar**: **Ctrl+L** focuses and selects the address bar. Enter a domain like `example.com` or a full URL. Use explicit `http://` for unencrypted HTTP. The `--url <address>` command-line option opens an address on startup.
+- **Navigation**: **Alt+←** and **Alt+→** navigate back and forward through tab history. **Ctrl+R** or **F5** reloads the active page.
+- **Local Files**: **⋯ → Open HTML** or **Ctrl+O** opens a local `.html` or `.htm` file encoded in UTF-8. You can also pass the file path as the first startup argument.
+- **Browser Studio**: **⋯ → Browser Studio** or **F2** opens the browser customizer (toolbar positioning, accent color themes, animation speeds). Configuration is saved to `%LOCALAPPDATA%\Browser\browser-studio.ini`. Use `--profile <path>` for isolated configurations.
+- **Motion Engine**: **⋯ → Motion Engine** (or `--motion-demo`) showcases layer transitions on a synthetic GPU procedural texture. **F** expands into borderless fullscreen, **Esc** returns to windowed mode.
+- **Diagnostics & Probing**:
+  - `--log <file>` records frame present timings, page layout latencies, and Motion Engine transitions.
+  - `--warp` forces Windows Advanced Rasterization Platform (WARP) software D3D11 rendering for diagnostics.
+  - `--motion-probe 30 --log motion.log` executes 30 automated windowed-to-fullscreen transitions, logs frame dispatch intervals, and exits cleanly.
 
-QuickJS выполняет скрипты с ограниченным набором DOM API. Часть TypeScript-аннотаций удаляется перед выполнением. Полная реализация HTML/CSS, сетевых API JavaScript, форм, веб-шрифтов и видео остаётся за пределами текущего прототипа.
+## Engine Capabilities
 
-Исходники сгруппированы по слоям `browser`, `content`, `net`, `gpu`, `components` и `testing`. Карта модулей и поток сетевой страницы описаны в [ARCHITECTURE.md](ARCHITECTURE.md).
+The engine renders static documents, server-side HTML, and interactive pages:
+- **Layout & CSS**: Block layout, inline text runs with mixed styling and UTF-16 ranges, tables, lists, basic Flexbox (`display: flex`, axis alignments), and basic Grid (fixed tracks, percentages, `fr`, and numeric `repeat()`). CSS selectors support tags, classes, IDs, attribute selectors, `!important` declarations, cascade inheritance, and basic media queries.
+- **Media & Images**: Decodes PNG, JPEG, WebP, GIF, and static SVG from remote URLs or inline base64 `data:` URIs.
+- **JavaScript**: QuickJS executes embedded and external scripts with lightweight DOM bindings (`click` handlers, DOM mutations, timers). Lightweight TypeScript annotations are stripped on the fly.
+- **Security & Network**: Network stack enforces TLS validation, limits payload sizes (documents up to 2 MiB, stylesheets 256 KiB, scripts 1 MiB, images 2 MiB), and prevents SSRF by blocking requests to local, loopback, and private IP ranges.
+
+## Architecture
+
+Source code is organized into modular layers:
+- `browser`: Win32 window host, tab strip UI, and GPU compositor coordinator (`browser_app`, `browser_core`).
+- `content`: HTML/CSS parser, DOM, style & layout engine, QuickJS runtime (`web_engine`), and isolated worker process (`web_content_process`).
+- `gpu`: Abstract display list (`display_list`), D3D11 / Direct2D renderer and Motion Engine compositor (`rendering_engine`, `rendering_ffi`).
+- `net`: Network stack, SSRF protection, URL validation, and HTTP/TLS fetcher.
+- `components`: Browser Studio configuration model (`browser_studio`).
+- `testing`: Fixtures and integration tests.
+
+For detailed module boundaries, IPC contracts, and pipeline flow, see [ARCHITECTURE.md](ARCHITECTURE.md).

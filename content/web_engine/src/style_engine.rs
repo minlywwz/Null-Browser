@@ -220,6 +220,10 @@ impl Style {
                 style.margin[0] = Length::Em(0.5);
                 style.margin[2] = Length::Em(0.5);
             }
+            "input" if node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("hidden")) => {
+                style.display = Display::None;
+                return style;
+            }
             "button" | "input" | "textarea" | "select" => {
                 style.display = Display::Block;
                 style.padding = [
@@ -232,6 +236,9 @@ impl Style {
                 style.border = 1.0;
                 style.border_color = Color::rgb(0xc5cad3);
                 style.radius = 6.0;
+                if tag == "textarea" {
+                    style.white_space = WhiteSpace::PreWrap;
+                }
             }
             "option" | "optgroup" => style.display = Display::None,
             "noscript" if document.scripting => {

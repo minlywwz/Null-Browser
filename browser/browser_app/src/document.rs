@@ -32,12 +32,21 @@ pub struct Page {
     pub resolved: Option<Url>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FormAction {
+    Click(u32),
+    Input { node: u32, value: String },
+    Toggle(u32),
+    Radio(u32),
+    Submit(u32),
+}
+
 struct Job {
     generation: u32,
     location: Location,
     viewport: Viewport,
     reload: bool,
-    click: Option<u32>,
+    action: Option<FormAction>,
 }
 
 pub struct Completion {
@@ -93,12 +102,41 @@ impl DocumentWorker {
                                 }
                                 site = Some(Site::open(network.as_ref().unwrap(), url, &log)?);
                             }
-                            let page = if let Some(node) = job.click {
-                                site.as_mut()
-                                    .unwrap()
-                                    .click(node, job.viewport, job.generation)
-                            } else {
-                                site.as_mut().unwrap().layout(job.viewport, job.generation)
+                            let page = match job.action {
+                                Some(FormAction::Click(node)) => {
+                                    site.as_mut().unwrap().click(node, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Input { node, value }) => {
+                                    site.as_mut().unwrap().form_input(node, value, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Toggle(node)) => {
+                                    site.as_mut().unwrap().form_toggle(node, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Radio(node)) => {
+                                    site.as_mut().unwrap().form_radio(node, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Submit(node)) => {
+                                    if let Some((action, query)) = site.as_ref().unwrap().submit_form(node) {
+                                        let target_href = if action.is_empty() {
+                                            query
+                                        } else if query.is_empty() {
+                                            action
+                                        } else if action.contains('?') {
+                                            format!("{}&{}", action, &query[1..])
+                                        } else {
+                                            format!("{}{}", action, query)
+                                        };
+                                        let target_url = url.join(&target_href).ok();
+                                        let mut page = site.as_mut().unwrap().layout(job.viewport, job.generation)?;
+                                        page.resolved = target_url;
+                                        Ok(page)
+                                    } else {
+                                        site.as_mut().unwrap().layout(job.viewport, job.generation)
+                                    }
+                                }
+                                None => {
+                                    site.as_mut().unwrap().layout(job.viewport, job.generation)
+                                }
                             };
                             if page.is_err() {
                                 site = None;
@@ -117,21 +155,43 @@ impl DocumentWorker {
                                 process.open_html(html)?;
                                 local = Some((job.location.clone(), process));
                             }
-                            let request = match job.click {
-                                Some(node) => Request::Click {
-                                    node,
-                                    viewport: job.viewport,
-                                },
-                                None => Request::Layout {
-                                    viewport: job.viewport,
-                                    assets: None,
-                                },
+                            let proc = &local.as_ref().unwrap().1;
+                            let page = match job.action {
+                                Some(FormAction::Click(node)) => {
+                                    proc.paint_page(Request::Click { node, viewport: job.viewport }, job.generation)
+                                }
+                                Some(FormAction::Input { node, value }) => {
+                                    proc.form_input(node, value, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Toggle(node)) => {
+                                    proc.form_toggle(node, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Radio(node)) => {
+                                    proc.form_radio(node, job.viewport, job.generation)
+                                }
+                                Some(FormAction::Submit(node)) => {
+                                    if let Some((action, query)) = proc.submit_form(node) {
+                                        let target_href = if action.is_empty() {
+                                            query
+                                        } else if query.is_empty() {
+                                            action
+                                        } else if action.contains('?') {
+                                            format!("{}&{}", action, &query[1..])
+                                        } else {
+                                            format!("{}{}", action, query)
+                                        };
+                                        let target_url = Url::parse(&target_href).ok();
+                                        let mut page = proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)?;
+                                        page.resolved = target_url;
+                                        Ok(page)
+                                    } else {
+                                        proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)
+                                    }
+                                }
+                                None => {
+                                    proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)
+                                }
                             };
-                            let page = local
-                                .as_ref()
-                                .unwrap()
-                                .1
-                                .paint_page(request, job.generation);
                             if page.is_err() {
                                 local = None;
                             }
@@ -152,8 +212,54 @@ impl DocumentWorker {
                             };
                             cached = Some((job.location.clone(), document, images));
                         }
-                        let (_, document, images) = cached.as_ref().unwrap();
-                        build_page(document, factory, job.generation, job.viewport, images)
+                        let (_, document, images) = cached.as_mut().unwrap();
+                        let mut input_state = None;
+                        let mut resolved = None;
+                        match job.action {
+                            Some(FormAction::Input { node, value }) => {
+                                document.set_attr(node as usize, "value", value);
+                                input_state = Some(web_engine::InputState {
+                                    focused: Some(node),
+                                    caret: usize::MAX,
+                                });
+                            }
+                            Some(FormAction::Toggle(node)) => {
+                                document.toggle_checkbox(node as usize);
+                            }
+                            Some(FormAction::Radio(node)) => {
+                                document.select_radio(node as usize);
+                            }
+                            Some(FormAction::Submit(node)) => {
+                                if let Some(form_id) = document.form_for_node(node as usize) {
+                                    if let Some((action, _method, pairs)) = document.serialize_form(form_id) {
+                                        let query = if pairs.is_empty() {
+                                            String::new()
+                                        } else {
+                                            let qs = pairs
+                                                .iter()
+                                                .map(|(k, v)| format!("{}={}", web_engine::url_encode(k), web_engine::url_encode(v)))
+                                                .collect::<Vec<_>>()
+                                                .join("&");
+                                            format!("?{qs}")
+                                        };
+                                        let target_href = if action.is_empty() {
+                                            query
+                                        } else if query.is_empty() {
+                                            action
+                                        } else if action.contains('?') {
+                                            format!("{}&{}", action, &query[1..])
+                                        } else {
+                                            format!("{}{}", action, query)
+                                        };
+                                        resolved = Url::parse(&target_href).ok();
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        let mut page = build_page(document, factory, job.generation, job.viewport, images, input_state)?;
+                        page.resolved = resolved;
+                        Ok(page)
                     })();
                     log.write(format_args!(
                         "document={} layout_ms={:.2} ok={}",
@@ -189,7 +295,7 @@ impl DocumentWorker {
         location: Location,
         viewport: Viewport,
         reload: bool,
-        click: Option<u32>,
+        action: Option<FormAction>,
     ) {
         let (lock, wake) = &*self.input;
         lock.lock().unwrap().next = Some(Job {
@@ -197,7 +303,7 @@ impl DocumentWorker {
             location,
             viewport,
             reload,
-            click,
+            action,
         });
         wake.notify_one();
     }
@@ -224,6 +330,7 @@ pub fn build_page(
     generation: u32,
     viewport: Viewport,
     images: &[Image],
+    input_state: Option<web_engine::InputState>,
 ) -> Result<Page, String> {
     let mut batch = factory.batch();
     let LaidOutPage {
@@ -244,6 +351,7 @@ pub fn build_page(
                 height: image.height,
             })
         },
+        input_state,
     )?;
     let geometry = Geometry {
         title: document.title().to_owned(),
@@ -339,6 +447,7 @@ mod tests {
                 height: 160.0,
             },
             &[],
+            None,
         )
         .unwrap();
         let mut renderer = draw_page(&page, 320, 160);
@@ -360,6 +469,7 @@ mod tests {
                 height: 850.0,
             },
             &[sample_image().unwrap()],
+            None,
         )
         .unwrap();
         assert_eq!(page.geometry.title, "Rendering sample");
@@ -393,6 +503,7 @@ mod tests {
                 height: 80.0,
             },
             &[],
+            None,
         )
         .unwrap();
         let mut renderer = draw_page(&page, 160, 80);
@@ -402,5 +513,40 @@ mod tests {
         let red = row.iter().position(|pixel| *pixel == 0xff0000).unwrap();
         let blue = row.iter().position(|pixel| *pixel == 0x0000ff).unwrap();
         assert!(red < blue);
+    }
+
+    #[test]
+    fn test_document_worker_form_actions_on_cached_document() {
+        let html = r#"
+            <form action="https://example.com/login" method="GET">
+                <input type="text" id="user" name="username" value="">
+                <input type="checkbox" id="remember" name="remember">
+                <input type="submit" id="btn" value="Log in">
+            </form>
+        "#;
+        let mut doc = web_engine::parse_html(html).unwrap();
+        let user_id = doc.element_by_id("user").unwrap() as u32;
+        let remember_id = doc.element_by_id("remember").unwrap() as u32;
+
+        // Input
+        doc.set_attr(user_id as usize, "value", "alice".into());
+        assert_eq!(doc.get_attr(user_id as usize, "value"), Some("alice"));
+
+        // Toggle
+        doc.toggle_checkbox(remember_id as usize);
+        assert_eq!(doc.get_attr(remember_id as usize, "checked"), Some(""));
+
+        // Submit
+        let form_id = doc.form_for_node(user_id as usize).unwrap();
+        let (action, _method, pairs) = doc.serialize_form(form_id).unwrap();
+        let qs = pairs
+            .iter()
+            .map(|(k, v)| format!("{}={}", web_engine::url_encode(k), web_engine::url_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let query = format!("?{qs}");
+        let target_href = format!("{}{}", action, query);
+        let target_url = Url::parse(&target_href).unwrap();
+        assert_eq!(target_url.as_str(), "https://example.com/login?username=alice&remember=on");
     }
 }

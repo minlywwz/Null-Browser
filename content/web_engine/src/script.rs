@@ -92,6 +92,10 @@ impl ScriptSession {
         std::cell::Ref::map(self.page.borrow(), |page| &page.document)
     }
 
+    pub fn document_mut(&self) -> std::cell::RefMut<'_, Document> {
+        std::cell::RefMut::map(self.page.borrow_mut(), |page| &mut page.document)
+    }
+
     pub fn install_scripts(&mut self, scripts: impl IntoIterator<Item = (String, String)>) {
         let mut page = self.page.borrow_mut();
         for (reference, source) in scripts {
@@ -1443,7 +1447,7 @@ mod tests {
             })
             .unwrap();
         let mut capture = Capture(String::new());
-        let page = layout(&session.document(), 640.0, &mut capture, |_| None).unwrap();
+        let page = layout(&session.document(), 640.0, &mut capture, |_| None, None).unwrap();
         assert!(
             capture.0.contains("Привет"),
             "text={:?} script={:?}",
@@ -1464,7 +1468,7 @@ mod tests {
             )
             .unwrap();
         capture.0.clear();
-        layout(&session.document(), 640.0, &mut capture, |_| None).unwrap();
+        layout(&session.document(), 640.0, &mut capture, |_| None, None).unwrap();
         assert!(capture.0.contains("Clicked"), "{}", capture.0);
         let _ = parse_html("<p></p>");
     }

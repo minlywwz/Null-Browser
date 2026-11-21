@@ -93,6 +93,45 @@ impl Site {
         self.paint(Request::Click { node, viewport }, generation)
     }
 
+    pub fn form_input(
+        &mut self,
+        node: u32,
+        value: String,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint(
+            Request::FormInput {
+                node,
+                value,
+                viewport,
+            },
+            generation,
+        )
+    }
+
+    pub fn form_toggle(
+        &mut self,
+        node: u32,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint(Request::FormToggle { node, viewport }, generation)
+    }
+
+    pub fn form_radio(
+        &mut self,
+        node: u32,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint(Request::FormRadio { node, viewport }, generation)
+    }
+
+    pub fn submit_form(&self, node: u32) -> Option<(String, String)> {
+        self.process.submit_form(node)
+    }
+
     fn paint(&mut self, request: Request, generation: u32) -> Result<Page, String> {
         let mut page = self.process.paint_page(request, generation)?;
         if self.script_shell && page.geometry.height == 0.0 {
@@ -118,6 +157,41 @@ impl WebContentProcess {
             geometry: scene.geometry,
             resolved: None,
         })
+    }
+
+    pub fn form_input(
+        &self,
+        node: u32,
+        value: String,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint_page(
+            Request::FormInput {
+                node,
+                value,
+                viewport,
+            },
+            generation,
+        )
+    }
+
+    pub fn form_toggle(
+        &self,
+        node: u32,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint_page(Request::FormToggle { node, viewport }, generation)
+    }
+
+    pub fn form_radio(
+        &self,
+        node: u32,
+        viewport: Viewport,
+        generation: u32,
+    ) -> Result<Page, String> {
+        self.paint_page(Request::FormRadio { node, viewport }, generation)
     }
 }
 

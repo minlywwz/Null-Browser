@@ -21,6 +21,12 @@ pub struct ImageInfo {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputState {
+    pub focused: Option<u32>,
+    pub caret: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Link {
     pub rect: Rect,
@@ -46,6 +52,7 @@ pub fn layout(
     width: f32,
     text: &mut impl TextMeasurer,
     resolve_image: impl Fn(&str) -> Option<ImageInfo>,
+    input_state: Option<InputState>,
 ) -> Result<LaidOutPage, String> {
     layout_with_stylesheets(
         document,
@@ -56,6 +63,7 @@ pub fn layout(
         &HashMap::new(),
         text,
         resolve_image,
+        input_state,
     )
 }
 
@@ -65,6 +73,7 @@ pub fn layout_with_stylesheets(
     external_stylesheets: &HashMap<String, String>,
     text: &mut impl TextMeasurer,
     resolve_image: impl Fn(&str) -> Option<ImageInfo>,
+    input_state: Option<InputState>,
 ) -> Result<LaidOutPage, String> {
     let styles = compute_styles(document, viewport, external_stylesheets)?;
     let canvas = ["html", "body"].into_iter().find_map(|tag| {
@@ -87,6 +96,7 @@ pub fn layout_with_stylesheets(
         commands: Vec::new(),
         links: Vec::new(),
         anchors: HashMap::new(),
+        input_state,
     };
     let flow_height = engine.children(
         0,
@@ -280,6 +290,7 @@ struct Layout<'a, T, I> {
     commands: Vec<Command>,
     links: Vec<Link>,
     anchors: HashMap<String, f32>,
+    input_state: Option<InputState>,
 }
 
 impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
@@ -935,8 +946,8 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         } else {
             0.0
         };
-        let content_height = if node.name() == "img" {
-            if let Some(image) = image {
+        let (content_height, control_link, is_focused) = if node.name() == "img" {
+            let height = if let Some(image) = image {
                 let height =
                     specified_height.unwrap_or(width * image.height as f32 / image.width as f32);
                 if style.visible {
@@ -950,25 +961,168 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 let mut alternative = InlineText::new();
                 alternative.append(node.attr("alt").unwrap_or(""), href, style)?;
                 self.flush(&mut alternative, style, content_x, content_y, width)?
-            }
+            };
+            (height, None, false)
         } else if node.name() == "input" {
-            let mut label = InlineText::new();
             let kind = node.attr("type").unwrap_or("text").to_ascii_lowercase();
             let value = node.attr("value").unwrap_or("");
             let placeholder = node.attr("placeholder").unwrap_or("");
-            let text = match kind.as_str() {
-                "password" if !value.is_empty() => "••••",
-                "checkbox" if node.attr("checked").is_some() => "☑",
-                "checkbox" => "☐",
-                "radio" if node.attr("checked").is_some() => "◉",
-                "radio" => "○",
-                "submit" if value.is_empty() => "Submit",
-                _ if value.is_empty() => placeholder,
-                _ => value,
+            let is_focused = self
+                .input_state
+                .is_some_and(|state| state.focused == Some(id as u32));
+            let caret = self.input_state.map_or(0, |state| state.caret);
+
+            let (text, control_link) = match kind.as_str() {
+                "submit" => {
+                    let text = if value.is_empty() { "Submit" } else { value };
+                    (text.to_string(), Some(format!("ko4:submit:{id}")))
+                }
+                "button" => {
+                    (value.to_string(), Some(format!("ko4:click:{id}")))
+                }
+                "checkbox" => {
+                    let text = if node.attr("checked").is_some() { "☑" } else { "☐" };
+                    (text.to_string(), Some(format!("ko4:toggle:{id}")))
+                }
+                "radio" => {
+                    let text = if node.attr("checked").is_some() { "◉" } else { "○" };
+                    (text.to_string(), Some(format!("ko4:radio:{id}")))
+                }
+                "password" => {
+                    let base = if !value.is_empty() { "••••" } else { placeholder };
+                    let text = if is_focused {
+                        let char_count = base.chars().count();
+                        let caret_idx = caret.min(char_count);
+                        let mut s = String::with_capacity(base.len() + 1);
+                        for (i, ch) in base.chars().enumerate() {
+                            if i == caret_idx {
+                                s.push('|');
+                            }
+                            s.push(ch);
+                        }
+                        if caret_idx == char_count {
+                            s.push('|');
+                        }
+                        s
+                    } else {
+                        base.to_string()
+                    };
+                    (text, Some(format!("ko4:input:{id}")))
+                }
+                _ => {
+                    let base = if !value.is_empty() { value } else { placeholder };
+                    let text = if is_focused {
+                        let char_count = base.chars().count();
+                        let caret_idx = caret.min(char_count);
+                        let mut s = String::with_capacity(base.len() + 1);
+                        for (i, ch) in base.chars().enumerate() {
+                            if i == caret_idx {
+                                s.push('|');
+                            }
+                            s.push(ch);
+                        }
+                        if caret_idx == char_count {
+                            s.push('|');
+                        }
+                        s
+                    } else {
+                        base.to_string()
+                    };
+                    (text, Some(format!("ko4:input:{id}")))
+                }
             };
-            label.append(text, href, style)?;
-            self.flush(&mut label, style, content_x, content_y, width)?
-                .max(style.text.size)
+
+            let mut label = InlineText::new();
+            label.append(&text, None, style)?;
+            let height = self
+                .flush(&mut label, style, content_x, content_y, width)?
+                .max(style.text.size);
+            (height, control_link, is_focused)
+        } else if node.name() == "button" {
+            let btn_type = node.attr("type").map(|t| t.to_ascii_lowercase());
+            let is_submit = match btn_type.as_deref() {
+                Some("button") => false,
+                Some("submit") => true,
+                _ => self.document.find_enclosing_form(id).is_some(),
+            };
+            let control_link = Some(if is_submit {
+                format!("ko4:submit:{id}")
+            } else {
+                format!("ko4:click:{id}")
+            });
+
+            let has_text_children = node.children.iter().any(|&child_id| {
+                match &self.document.nodes[child_id].kind {
+                    Kind::Text(t) => !t.trim().is_empty(),
+                    Kind::Element { .. } => !self.document.text_of(child_id).trim().is_empty(),
+                    _ => false,
+                }
+            });
+
+            let content_height = if has_text_children {
+                self.children(
+                    id,
+                    content_x,
+                    content_y,
+                    ContainingBlock {
+                        width,
+                        height: specified_height,
+                    },
+                    href,
+                )?
+            } else {
+                let mut label = InlineText::new();
+                let text = node
+                    .attr("value")
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("Submit");
+                label.append(text, None, style)?;
+                self.flush(&mut label, style, content_x, content_y, width)?
+                    .max(style.text.size)
+            };
+            (content_height, control_link, false)
+        } else if node.name() == "textarea" {
+            let is_focused = self
+                .input_state
+                .is_some_and(|state| state.focused == Some(id as u32));
+            let caret = self.input_state.map_or(0, |state| state.caret);
+            let control_link = Some(format!("ko4:input:{id}"));
+
+            let raw_text = if let Some(value) = node.attr("value") {
+                value.to_owned()
+            } else {
+                let text = self.document.text_of(id);
+                if text.is_empty() {
+                    node.attr("placeholder").unwrap_or("").to_owned()
+                } else {
+                    text
+                }
+            };
+
+            let text = if is_focused {
+                let char_count = raw_text.chars().count();
+                let caret_idx = caret.min(char_count);
+                let mut s = String::with_capacity(raw_text.len() + 1);
+                for (i, ch) in raw_text.chars().enumerate() {
+                    if i == caret_idx {
+                        s.push('|');
+                    }
+                    s.push(ch);
+                }
+                if caret_idx == char_count {
+                    s.push('|');
+                }
+                s
+            } else {
+                raw_text
+            };
+
+            let mut label = InlineText::new();
+            label.append(&text, None, style)?;
+            let height = self
+                .flush(&mut label, style, content_x, content_y, width)?
+                .max(style.text.size * 2.0);
+            (height, control_link, is_focused)
         } else if node.name() == "select" {
             let mut options = node
                 .children
@@ -999,10 +1153,11 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     }
                 }
             }
-            self.flush(&mut label, style, content_x, content_y, width)?
-                .max(style.text.size)
+            let height = self.flush(&mut label, style, content_x, content_y, width)?
+                .max(style.text.size);
+            (height, None, false)
         } else {
-            self.children(
+            let height = self.children(
                 id,
                 content_x,
                 content_y,
@@ -1011,7 +1166,8 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     height: specified_height,
                 },
                 href,
-            )?
+            )?;
+            (height, None, false)
         };
         let content_height = content_height.max(marker_height);
         let used_height = specified_height
@@ -1078,6 +1234,44 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 },
             ]);
         }
+        if is_focused && style.visible {
+            let outline = 2.0f32;
+            let color = paint(Color::rgb(0x1a73e8), style.opacity);
+            let bottom = rect.y + rect.height - outline;
+            let right = rect.x + rect.width - outline;
+            self.commands.extend([
+                Command::Fill {
+                    rect: Rect::new(rect.x, rect.y, rect.width, outline),
+                    color,
+                    radius: 0.0,
+                },
+                Command::Fill {
+                    rect: Rect::new(rect.x, bottom, rect.width, outline),
+                    color,
+                    radius: 0.0,
+                },
+                Command::Fill {
+                    rect: Rect::new(
+                        rect.x,
+                        rect.y + outline,
+                        outline,
+                        (rect.height - outline * 2.0).max(0.0),
+                    ),
+                    color,
+                    radius: 0.0,
+                },
+                Command::Fill {
+                    rect: Rect::new(
+                        right,
+                        rect.y + outline,
+                        outline,
+                        (rect.height - outline * 2.0).max(0.0),
+                    ),
+                    color,
+                    radius: 0.0,
+                },
+            ]);
+        }
         if let Some(index) = clip {
             self.commands[index] = Command::PushClip { rect };
             self.commands.push(Command::PopClip);
@@ -1100,7 +1294,16 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 href: href.to_owned(),
             });
         }
-        if style.visible && self.document.clickable.contains(&id) {
+        let has_control = control_link.is_some();
+        if style.visible
+            && let Some(control_href) = control_link
+        {
+            self.links.push(Link {
+                rect,
+                href: control_href,
+            });
+        }
+        if style.visible && self.document.clickable.contains(&id) && !has_control {
             self.links.push(Link {
                 rect,
                 href: format!("ko4:click:{id}"),
@@ -1156,7 +1359,7 @@ mod tests {
             <body><p id="box" class="override">🧭 <a href="#box">Мир</a></p>
             <script><p>blocked</p></script><img src="https://example.org/x.png" alt="Alternative"></body>
         "##).unwrap();
-        let layout = layout(&page, 200.0, &mut FixedText, |_| None).unwrap();
+        let layout = layout(&page, 200.0, &mut FixedText, |_| None, None).unwrap();
         assert_eq!(layout.display_list.background, Color::rgb(0x202030));
         assert!(
             matches!(layout.display_list.commands[0], Command::Text { bounds, color, .. }
@@ -1211,6 +1414,7 @@ mod tests {
             &styles,
             &mut FixedText,
             |_| None,
+            None,
         )
         .unwrap();
         assert_eq!(result.display_list.background, Color::rgb(0xebf2fa));
@@ -1236,7 +1440,7 @@ mod tests {
             </body>"#,
         )
         .unwrap();
-        let result = layout(&page, 250.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 250.0, &mut FixedText, |_| None, None).unwrap();
         let fill: Vec<_> = result
             .display_list
             .commands
@@ -1285,13 +1489,19 @@ mod tests {
             </body>"#,
         )
         .unwrap();
-        let result = layout(&page, 200.0, &mut FixedText, |_| {
-            Some(ImageInfo {
-                id: 0,
-                width: 80,
-                height: 40,
-            })
-        })
+        let result = layout(
+            &page,
+            200.0,
+            &mut FixedText,
+            |_| {
+                Some(ImageInfo {
+                    id: 0,
+                    width: 80,
+                    height: 40,
+                })
+            },
+            None,
+        )
         .unwrap();
         let images: Vec<_> = result
             .display_list
@@ -1349,7 +1559,7 @@ mod tests {
             }
         }
         let page = parse_html("<pre>\r\n  <b>🧭</b>\r\n  line</pre>").unwrap();
-        layout(&page, 150.0, &mut Recorder, |_| None).unwrap();
+        layout(&page, 150.0, &mut Recorder, |_| None, None).unwrap();
     }
 
     #[test]
@@ -1367,7 +1577,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 300.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 300.0, &mut FixedText, |_| None, None).unwrap();
         assert_eq!(result.anchors["tail"], 100.0);
         assert!(result.display_list.commands.iter().any(|command| matches!(
             command, Command::Fill { rect, color, .. }
@@ -1411,7 +1621,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 400.0, &mut Wrap, |_| None).unwrap();
+        let result = layout(&page, 400.0, &mut Wrap, |_| None, None).unwrap();
         let link = result
             .links
             .iter()
@@ -1441,7 +1651,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 300.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 300.0, &mut FixedText, |_| None, None).unwrap();
         let text = result
             .display_list
             .commands
@@ -1472,7 +1682,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 400.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
         let about = result.links.iter().find(|link| link.href == "/a").unwrap();
         let news = result.links.iter().find(|link| link.href == "/b").unwrap();
         assert_eq!(about.rect.x, 16.0);
@@ -1500,7 +1710,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 400.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
         let about = result.links.iter().find(|link| link.href == "/a").unwrap();
         let news = result.links.iter().find(|link| link.href == "/b").unwrap();
         assert_eq!(about.rect.x, 0.0);
@@ -1518,7 +1728,7 @@ mod tests {
             "<style>{css}</style><body style=\"margin:0\"><a class=\"lg\" href=\"/a\">About</a></body>"
         ))
         .unwrap();
-        let result = layout(&page, 400.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
         let about = result
             .links
             .iter()
@@ -1547,7 +1757,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let result = layout(&page, 120.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 120.0, &mut FixedText, |_| None, None).unwrap();
         let text: Vec<_> = result
             .display_list
             .commands
@@ -1570,8 +1780,166 @@ mod tests {
         let page = parse_html(r#"<html><head><title>Shell</title><script src="/app.js"></script></head>
             <body><div id="root"></div><noscript><p><a href="/help">Open the site help</a></p></noscript></body></html>"#).unwrap();
         assert!(page.is_script_shell());
-        let result = layout(&page, 400.0, &mut FixedText, |_| None).unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
         assert!(result.height > 0.0);
         assert_eq!(result.links[0].href, "/help");
+    }
+
+    #[test]
+    fn test_input_control_links() {
+        let page = parse_html(
+            r#"
+            <input id="txt" type="text" value="hello">
+            <input id="pwd" type="password" value="secret">
+            <input id="sub" type="submit" value="Go">
+            <input id="btn" type="button" value="Click">
+            <input id="chk" type="checkbox" checked>
+            <input id="rad" type="radio">
+        "#,
+        )
+        .unwrap();
+
+        let txt = page.element_by_id("txt").unwrap();
+        let pwd = page.element_by_id("pwd").unwrap();
+        let sub = page.element_by_id("sub").unwrap();
+        let btn = page.element_by_id("btn").unwrap();
+        let chk = page.element_by_id("chk").unwrap();
+        let rad = page.element_by_id("rad").unwrap();
+
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
+
+        let hrefs: Vec<_> = result.links.iter().map(|l| l.href.as_str()).collect();
+        assert!(hrefs.contains(&format!("ko4:input:{txt}").as_str()));
+        assert!(hrefs.contains(&format!("ko4:input:{pwd}").as_str()));
+        assert!(hrefs.contains(&format!("ko4:submit:{sub}").as_str()));
+        assert!(hrefs.contains(&format!("ko4:click:{btn}").as_str()));
+        assert!(hrefs.contains(&format!("ko4:toggle:{chk}").as_str()));
+        assert!(hrefs.contains(&format!("ko4:radio:{rad}").as_str()));
+    }
+
+    #[test]
+    fn test_focused_input_caret_and_accent_outline() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                style: TextStyle,
+                width: f32,
+                links: &[TextRange],
+            ) -> Result<TextMetrics, String> {
+                self.0.push(text.to_owned());
+                FixedText.measure(text, style, width, links)
+            }
+        }
+
+        let page = parse_html(r#"<input id="txt" type="text" value="hello">"#).unwrap();
+        let txt = page.element_by_id("txt").unwrap();
+
+        // 1. Unfocused
+        let mut measurer = TextCapture(Vec::new());
+        let result = layout(&page, 400.0, &mut measurer, |_| None, None).unwrap();
+        assert!(measurer.0.contains(&"hello".to_string()));
+        let accent_fill = result.display_list.commands.iter().any(|c| match c {
+            Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8) => true,
+            _ => false,
+        });
+        assert!(!accent_fill, "unfocused input should not have accent outline");
+
+        // 2. Focused with caret at position 2
+        let mut measurer = TextCapture(Vec::new());
+        let input_state = Some(InputState {
+            focused: Some(txt as u32),
+            caret: 2,
+        });
+        let result = layout(&page, 400.0, &mut measurer, |_| None, input_state).unwrap();
+        assert!(
+            measurer.0.contains(&"he|llo".to_string()),
+            "captured: {:?}",
+            measurer.0
+        );
+        let accent_fill = result.display_list.commands.iter().any(|c| match c {
+            Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8) => true,
+            _ => false,
+        });
+        assert!(accent_fill, "focused input should have accent outline");
+
+        // 3. Focused with caret at start (0)
+        let mut measurer = TextCapture(Vec::new());
+        let input_state = Some(InputState {
+            focused: Some(txt as u32),
+            caret: 0,
+        });
+        let _ = layout(&page, 400.0, &mut measurer, |_| None, input_state).unwrap();
+        assert!(measurer.0.contains(&"|hello".to_string()));
+
+        // 4. Focused with caret clamped at end (100)
+        let mut measurer = TextCapture(Vec::new());
+        let input_state = Some(InputState {
+            focused: Some(txt as u32),
+            caret: 100,
+        });
+        let _ = layout(&page, 400.0, &mut measurer, |_| None, input_state).unwrap();
+        assert!(measurer.0.contains(&"hello|".to_string()));
+    }
+
+    #[test]
+    fn test_button_layout_and_links() {
+        let page = parse_html(
+            r#"
+            <form id="f">
+                <button id="b_sub">Submit Button</button>
+                <button id="b_custom" type="button">Custom Button</button>
+                <button id="b_empty"></button>
+            </form>
+            <button id="b_out" value="Save"></button>
+        "#,
+        )
+        .unwrap();
+
+        let b_sub = page.element_by_id("b_sub").unwrap();
+        let b_custom = page.element_by_id("b_custom").unwrap();
+        let b_empty = page.element_by_id("b_empty").unwrap();
+        let b_out = page.element_by_id("b_out").unwrap();
+
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
+
+        let sub_link = result.links.iter().find(|l| l.href == format!("ko4:submit:{b_sub}"));
+        assert!(sub_link.is_some());
+
+        let custom_link = result.links.iter().find(|l| l.href == format!("ko4:click:{b_custom}"));
+        assert!(custom_link.is_some());
+
+        let empty_link = result.links.iter().find(|l| l.href == format!("ko4:submit:{b_empty}"));
+        assert!(empty_link.is_some());
+
+        let out_link = result.links.iter().find(|l| l.href == format!("ko4:click:{b_out}"));
+        assert!(out_link.is_some());
+    }
+
+    #[test]
+    fn test_textarea_layout_and_link() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                style: TextStyle,
+                width: f32,
+                links: &[TextRange],
+            ) -> Result<TextMetrics, String> {
+                self.0.push(text.to_owned());
+                FixedText.measure(text, style, width, links)
+            }
+        }
+
+        let page = parse_html(r#"<textarea id="ta">First line&#10;Second line</textarea>"#).unwrap();
+        let ta = page.element_by_id("ta").unwrap();
+
+        let mut measurer = TextCapture(Vec::new());
+        let result = layout(&page, 400.0, &mut measurer, |_| None, None).unwrap();
+
+        assert!(result.links.iter().any(|l| l.href == format!("ko4:input:{ta}")));
+        assert!(measurer.0.iter().any(|t| t.contains("First line\nSecond line")));
     }
 }

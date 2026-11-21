@@ -48,9 +48,10 @@ use super::address_bar::{self, AddressBar};
 use crate::{
     Log, Options,
     chrome::{self, Action, Geometry as ChromeGeometry, Model},
-    document::{DocumentWorker, Geometry},
+    document::{DocumentWorker, FormAction, Geometry},
     render::{PageUpdate, RenderWorker, View},
 };
+use web_engine::ControlAction;
 
 pub const DOCUMENT_READY: u32 = WM_APP + 1;
 pub const PAGE_PRESENTED: u32 = WM_APP + 2;
@@ -83,6 +84,7 @@ pub(super) enum Event {
     AddressCancel,
     AddressBlur,
     SettingsChanged,
+    Char(char),
     Document,
     Presented(u32),
     MotionComplete(u32),
@@ -183,6 +185,20 @@ unsafe extern "system" fn procedure(
                 alt,
             }
         }
+        WM_CHAR => {
+            let editing = APP.with(|slot| {
+                slot.try_borrow()
+                    .ok()
+                    .and_then(|app| app.as_ref().map(|a| a.editing))
+                    .unwrap_or(false)
+            });
+            if !editing {
+                if let Some(ch) = char::from_u32(wparam as u32) {
+                    send(Event::Char(ch));
+                }
+            }
+            return 0;
+        }
         DOCUMENT_READY => Event::Document,
         PAGE_PRESENTED => Event::Presented(wparam as u32),
         RENDER_STOPPED => Event::RendererStopped,
@@ -277,7 +293,7 @@ struct Navigation {
     scroll: Option<f32>,
     anchor: Option<String>,
     reload: bool,
-    click: Option<u32>,
+    action: Option<FormAction>,
 }
 
 struct MotionProbe {
@@ -316,6 +332,8 @@ struct App {
     tracking_mouse: bool,
     closing: bool,
     error: Option<String>,
+    focused_input: Option<(u32, String)>,
+    input_values: std::collections::HashMap<u32, String>,
 }
 
 impl App {
@@ -450,7 +468,7 @@ impl App {
             scroll: None,
             anchor: None,
             reload: false,
-            click: None,
+            action: None,
         });
         self.generation = self.generation.wrapping_add(1);
         let viewport = Viewport {
@@ -463,7 +481,7 @@ impl App {
             navigation.location.clone(),
             viewport,
             navigation.reload,
-            navigation.click,
+            navigation.action.clone(),
         );
     }
 
@@ -497,6 +515,13 @@ impl App {
             };
             match completion.result {
                 Ok(page) => {
+                    let was_submit = matches!(pending.action, Some(FormAction::Submit(_)));
+                    if was_submit {
+                        if let Some(target_url) = page.resolved {
+                            self.navigate_web(target_url);
+                            return;
+                        }
+                    }
                     let transition = self.geometry.is_some()
                         && !self.demo
                         && self.motion_ms() > 0
@@ -631,13 +656,14 @@ impl App {
         self.studio = false;
         self.menu = false;
         self.status = None;
+        self.focused_input = None;
         self.request(Navigation {
             location,
             visit,
             scroll,
             anchor: None,
             reload: false,
-            click: None,
+            action: None,
         });
     }
 
@@ -647,13 +673,14 @@ impl App {
             self.studio = false;
             self.menu = false;
             self.status = None;
+            self.focused_input = None;
             self.request(Navigation {
                 location,
                 visit,
                 scroll: Some(scroll),
                 anchor: None,
                 reload: false,
-                click: None,
+                action: None,
             });
         }
     }
@@ -667,26 +694,28 @@ impl App {
         self.studio = false;
         self.menu = false;
         self.status = None;
+        self.focused_input = None;
         self.request(Navigation {
             location,
             visit: if same { Visit::Current } else { Visit::New },
             scroll: Some(0.0),
             anchor,
             reload: same,
-            click: None,
+            action: None,
         });
     }
 
     fn reload(&mut self) {
         self.menu = false;
         self.status = None;
+        self.focused_input = None;
         self.request(Navigation {
             location: self.tabs.active_tab().location().clone(),
             visit: Visit::Current,
             scroll: None,
             anchor: None,
             reload: true,
-            click: None,
+            action: None,
         });
     }
 
@@ -725,7 +754,7 @@ impl App {
         }
     }
 
-    fn activate_control(&mut self, node: u32) {
+    fn send_form_action(&mut self, action: FormAction) {
         self.status = None;
         self.request(Navigation {
             location: self.tabs.active_tab().location().clone(),
@@ -733,8 +762,12 @@ impl App {
             scroll: Some(self.scroll),
             anchor: None,
             reload: false,
-            click: Some(node),
+            action: Some(action),
         });
+    }
+
+    fn activate_control(&mut self, node: u32) {
+        self.send_form_action(FormAction::Click(node));
     }
 
     fn follow(&mut self, href: &str) {
@@ -757,13 +790,14 @@ impl App {
                 }
             }
         } else {
+            self.focused_input = None;
             self.request(Navigation {
                 location,
                 visit: Visit::New,
                 scroll: Some(0.0),
                 anchor,
                 reload: false,
-                click: None,
+                action: None,
             });
         }
     }
@@ -979,7 +1013,10 @@ impl App {
             (VK_F2, _, false) => self.activate(Action::Studio),
             (0x46 | VK_F11, false, false) if self.demo => self.toggle_fullscreen(),
             (VK_ESCAPE, _, false) => {
-                if self.studio {
+                if self.focused_input.is_some() {
+                    self.focused_input = None;
+                    self.request_layout();
+                } else if self.studio {
                     self.studio = false;
                 } else if self.menu {
                     self.menu = false;
@@ -996,7 +1033,10 @@ impl App {
             (VK_UP, _, false) => self.set_scroll(self.scroll - 42.0),
             (VK_DOWN, _, false) => self.set_scroll(self.scroll + 42.0),
             (VK_PRIOR, _, false) => self.set_scroll(self.scroll - self.viewport().height * 0.85),
-            (VK_NEXT | VK_SPACE, _, false) => {
+            (VK_NEXT, _, false) => {
+                self.set_scroll(self.scroll + self.viewport().height * 0.85)
+            }
+            (VK_SPACE, _, false) if self.focused_input.is_none() => {
                 self.set_scroll(self.scroll + self.viewport().height * 0.85)
             }
             (VK_HOME, _, false) => self.set_scroll(0.0),
@@ -1110,13 +1150,41 @@ impl App {
                     }
                 } else if let Some(href) = self.link_at(x, y).map(str::to_owned) {
                     self.end_address();
-                    if let Some(node) = web_engine::control_target(&href) {
-                        self.activate_control(node);
-                    } else {
-                        self.follow(&href);
+                    match web_engine::parse_control_action(&href) {
+                        Some(ControlAction::Input(id)) => {
+                            let current_value = self.input_values.get(&id).cloned().unwrap_or_default();
+                            self.focused_input = Some((id, current_value.clone()));
+                            self.send_form_action(FormAction::Input {
+                                node: id,
+                                value: current_value,
+                            });
+                        }
+                        Some(ControlAction::Toggle(id)) => {
+                            self.send_form_action(FormAction::Toggle(id));
+                        }
+                        Some(ControlAction::Radio(id)) => {
+                            self.send_form_action(FormAction::Radio(id));
+                        }
+                        Some(ControlAction::Submit(id)) => {
+                            self.send_form_action(FormAction::Submit(id));
+                        }
+                        Some(ControlAction::Click(id)) => {
+                            self.activate_control(id);
+                        }
+                        None => {
+                            if self.focused_input.is_some() {
+                                self.focused_input = None;
+                                self.request_layout();
+                            }
+                            self.follow(&href);
+                        }
                     }
                 } else {
                     self.end_address();
+                    if self.focused_input.is_some() {
+                        self.focused_input = None;
+                        self.request_layout();
+                    }
                 }
             }
             Event::Wheel(delta) => self.set_scroll(self.scroll - delta * 0.75),
@@ -1135,6 +1203,32 @@ impl App {
                 }
             }
             Event::AddressCancel | Event::AddressBlur => self.end_address(),
+            Event::Char(ch) => {
+                if let Some((node, ref mut text)) = self.focused_input {
+                    if ch == '\r' {
+                        self.send_form_action(FormAction::Submit(node));
+                    } else if ch == '\x08' {
+                        text.pop();
+                        let value = text.clone();
+                        self.input_values.insert(node, value.clone());
+                        self.send_form_action(FormAction::Input {
+                            node,
+                            value,
+                        });
+                    } else if ch == '\x1b' {
+                        self.focused_input = None;
+                        self.request_layout();
+                    } else if !ch.is_control() {
+                        text.push(ch);
+                        let value = text.clone();
+                        self.input_values.insert(node, value.clone());
+                        self.send_form_action(FormAction::Input {
+                            node,
+                            value,
+                        });
+                    }
+                }
+            }
             Event::Document => {
                 self.document_ready();
                 return;
@@ -1384,6 +1478,8 @@ pub fn run(options: Options, log: Log) -> Result<(), String> {
         tracking_mouse: false,
         closing: false,
         error: None,
+        focused_input: None,
+        input_values: std::collections::HashMap::new(),
     };
     if let Some(path) = options.file {
         app.open(Location::File(path));

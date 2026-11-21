@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-pub(crate) type NodeId = usize;
+pub type NodeId = usize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamMarker {
@@ -98,7 +98,7 @@ impl Document {
             .collect()
     }
 
-    pub(crate) fn element_by_id(&self, id: &str) -> Option<NodeId> {
+    pub fn element_by_id(&self, id: &str) -> Option<NodeId> {
         let id = id.trim();
         if id.is_empty() || id.len() > 256 {
             return None;
@@ -377,6 +377,206 @@ impl Document {
         self.tree_order()
             .filter(|id| self.stylesheets.binary_search(id).is_ok())
     }
+
+    pub fn set_attr(&mut self, node: NodeId, key: &str, value: String) {
+        if let Some(node) = self.nodes.get_mut(node) {
+            if let Kind::Element { attributes, .. } = &mut node.kind {
+                if let Some((_, existing)) = attributes
+                    .iter_mut()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                {
+                    *existing = value;
+                } else {
+                    attributes.push((key.to_ascii_lowercase(), value));
+                }
+            }
+        }
+    }
+
+    pub fn remove_attr(&mut self, node: NodeId, key: &str) {
+        if let Some(node) = self.nodes.get_mut(node) {
+            if let Kind::Element { attributes, .. } = &mut node.kind {
+                attributes.retain(|(name, _)| !name.eq_ignore_ascii_case(key));
+            }
+        }
+    }
+
+    pub fn get_attr(&self, node: NodeId, key: &str) -> Option<&str> {
+        let node = self.nodes.get(node)?;
+        match &node.kind {
+            Kind::Element { attributes, .. } => attributes
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                .map(|(_, value)| value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn find_enclosing_form(&self, node: NodeId) -> Option<NodeId> {
+        let mut current = self.nodes.get(node)?.parent;
+        while let Some(id) = current {
+            let n = self.nodes.get(id)?;
+            if n.name() == "form" {
+                return Some(id);
+            }
+            current = n.parent;
+        }
+        None
+    }
+
+    pub fn form_for_node(&self, node: NodeId) -> Option<NodeId> {
+        let n = self.nodes.get(node)?;
+        if n.name() == "form" {
+            return Some(node);
+        }
+        self.find_enclosing_form(node)
+    }
+
+    pub fn serialize_form(&self, form_id: NodeId) -> Option<(String, String, Vec<(String, String)>)> {
+        let form_node = self.nodes.get(form_id)?;
+        if form_node.name() != "form" {
+            return None;
+        }
+        let action = self.get_attr(form_id, "action").unwrap_or("").to_owned();
+        let method = self
+            .get_attr(form_id, "method")
+            .unwrap_or("GET")
+            .to_ascii_uppercase();
+
+        let mut pairs = Vec::new();
+        let mut pending = form_node.children.clone();
+        pending.reverse();
+        while let Some(id) = pending.pop() {
+            let node = &self.nodes[id];
+            for child in node.children.iter().rev() {
+                pending.push(*child);
+            }
+
+            if node.attr("disabled").is_some() {
+                continue;
+            }
+
+            match node.name() {
+                "input" => {
+                    let Some(name) = node.attr("name") else {
+                        continue;
+                    };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let kind = node.attr("type").unwrap_or("text").to_ascii_lowercase();
+                    if matches!(kind.as_str(), "submit" | "button" | "reset" | "image") {
+                        continue;
+                    }
+                    if matches!(kind.as_str(), "checkbox" | "radio") {
+                        if node.attr("checked").is_none() {
+                            continue;
+                        }
+                        let value = node.attr("value").unwrap_or("on");
+                        pairs.push((name.to_owned(), value.to_owned()));
+                    } else {
+                        let value = node.attr("value").unwrap_or("");
+                        pairs.push((name.to_owned(), value.to_owned()));
+                    }
+                }
+                "textarea" => {
+                    let Some(name) = node.attr("name") else {
+                        continue;
+                    };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let value = if let Some(value) = node.attr("value") {
+                        value.to_owned()
+                    } else {
+                        self.text_of(id)
+                    };
+                    pairs.push((name.to_owned(), value));
+                }
+                "select" => {
+                    let Some(name) = node.attr("name") else {
+                        continue;
+                    };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let mut options = Vec::new();
+                    let mut opt_pending = node.children.clone();
+                    opt_pending.reverse();
+                    while let Some(child_id) = opt_pending.pop() {
+                        let child = &self.nodes[child_id];
+                        if child.name() == "optgroup" {
+                            for gchild in child.children.iter().rev() {
+                                opt_pending.push(*gchild);
+                            }
+                        } else if child.name() == "option" && child.attr("disabled").is_none() {
+                            options.push(child_id);
+                        }
+                    }
+                    let selected = options
+                        .iter()
+                        .find(|&&opt_id| self.nodes[opt_id].attr("selected").is_some())
+                        .or_else(|| options.first());
+                    if let Some(&opt_id) = selected {
+                        let opt_node = &self.nodes[opt_id];
+                        let val = if let Some(v) = opt_node.attr("value") {
+                            v.to_owned()
+                        } else {
+                            self.text_of(opt_id)
+                        };
+                        pairs.push((name.to_owned(), val));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Some((action, method, pairs))
+    }
+
+    pub fn toggle_checkbox(&mut self, node: NodeId) {
+        if self.get_attr(node, "checked").is_some() {
+            self.remove_attr(node, "checked");
+        } else {
+            self.set_attr(node, "checked", String::new());
+        }
+    }
+
+    pub fn select_radio(&mut self, node: NodeId) {
+        let name = self.get_attr(node, "name").map(str::to_owned);
+        if let Some(name) = name {
+            let candidates: Vec<NodeId> = if let Some(form_id) = self.find_enclosing_form(node) {
+                let mut list = Vec::new();
+                let mut pending = self.nodes[form_id].children.clone();
+                pending.reverse();
+                while let Some(id) = pending.pop() {
+                    list.push(id);
+                    for child in self.nodes[id].children.iter().rev() {
+                        pending.push(*child);
+                    }
+                }
+                list
+            } else {
+                self.tree_order().collect()
+            };
+
+            for other_id in candidates {
+                if other_id != node {
+                    let is_radio = self.nodes[other_id].name() == "radio"
+                        || (self.nodes[other_id].name() == "input"
+                            && self
+                                .get_attr(other_id, "type")
+                                .map(|t| t.to_ascii_lowercase())
+                                .as_deref()
+                                == Some("radio"));
+                    if is_radio && self.get_attr(other_id, "name") == Some(&name) {
+                        self.remove_attr(other_id, "checked");
+                    }
+                }
+            }
+        }
+        self.set_attr(node, "checked", String::new());
+    }
 }
 
 pub(crate) struct ScriptBlock {
@@ -464,4 +664,131 @@ pub(crate) fn is_inert(tag: &str) -> bool {
         tag,
         "template" | "iframe" | "object" | "embed" | "video" | "audio"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_html;
+
+    #[test]
+    fn test_attribute_helpers() {
+        let mut doc = parse_html(r#"<div id="target" class="foo"></div>"#).unwrap();
+        let target = doc.element_by_id("target").unwrap();
+
+        assert_eq!(doc.get_attr(target, "class"), Some("foo"));
+        assert_eq!(doc.get_attr(target, "nonexistent"), None);
+
+        doc.set_attr(target, "class", "bar".into());
+        assert_eq!(doc.get_attr(target, "class"), Some("bar"));
+
+        doc.set_attr(target, "data-val", "123".into());
+        assert_eq!(doc.get_attr(target, "data-val"), Some("123"));
+
+        doc.remove_attr(target, "class");
+        assert_eq!(doc.get_attr(target, "class"), None);
+    }
+
+    #[test]
+    fn test_find_enclosing_form() {
+        let doc = parse_html(
+            r#"<form id="f1"><div><input id="in1"></div></form><input id="in2">"#,
+        )
+        .unwrap();
+        let f1 = doc.element_by_id("f1").unwrap();
+        let in1 = doc.element_by_id("in1").unwrap();
+        let in2 = doc.element_by_id("in2").unwrap();
+
+        assert_eq!(doc.find_enclosing_form(in1), Some(f1));
+        assert_eq!(doc.find_enclosing_form(in2), None);
+        assert_eq!(doc.find_enclosing_form(f1), None);
+    }
+
+    #[test]
+    fn test_serialize_form() {
+        let doc = parse_html(
+            r#"
+            <form id="login" action="/submit-login" method="post">
+                <input type="text" name="username" value="alice">
+                <input type="password" name="password" value="secret">
+                <input type="checkbox" name="remember" checked>
+                <input type="checkbox" name="opt_in" value="yes">
+                <input type="radio" name="plan" value="free">
+                <input type="radio" name="plan" value="pro" checked>
+                <input type="submit" name="btn" value="Log In">
+                <input type="button" value="Cancel">
+                <input type="reset" value="Reset">
+                <input type="text" value="unnamed">
+                <input type="text" name="" value="empty_name">
+                <input type="text" name="disabled_field" value="nope" disabled>
+                <textarea name="bio">Software developer</textarea>
+                <select name="tier">
+                    <option value="1">Bronze</option>
+                    <option value="2" selected>Silver</option>
+                    <option value="3">Gold</option>
+                </select>
+            </form>
+        "#,
+        )
+        .unwrap();
+        let form = doc.element_by_id("login").unwrap();
+        let (action, method, pairs) = doc.serialize_form(form).unwrap();
+
+        assert_eq!(action, "/submit-login");
+        assert_eq!(method, "POST");
+        assert_eq!(
+            pairs,
+            vec![
+                ("username".to_string(), "alice".to_string()),
+                ("password".to_string(), "secret".to_string()),
+                ("remember".to_string(), "on".to_string()),
+                ("plan".to_string(), "pro".to_string()),
+                ("bio".to_string(), "Software developer".to_string()),
+                ("tier".to_string(), "2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_toggle_checkbox() {
+        let mut doc = parse_html(r#"<input id="c1" type="checkbox"><input id="c2" type="checkbox" checked>"#).unwrap();
+        let c1 = doc.element_by_id("c1").unwrap();
+        let c2 = doc.element_by_id("c2").unwrap();
+
+        assert_eq!(doc.get_attr(c1, "checked"), None);
+        doc.toggle_checkbox(c1);
+        assert_eq!(doc.get_attr(c1, "checked"), Some(""));
+        doc.toggle_checkbox(c1);
+        assert_eq!(doc.get_attr(c1, "checked"), None);
+
+        assert_eq!(doc.get_attr(c2, "checked"), Some(""));
+        doc.toggle_checkbox(c2);
+        assert_eq!(doc.get_attr(c2, "checked"), None);
+    }
+
+    #[test]
+    fn test_select_radio() {
+        let mut doc = parse_html(
+            r#"
+            <form id="f">
+                <input id="r1" type="radio" name="group1" value="a" checked>
+                <input id="r2" type="radio" name="group1" value="b">
+                <input id="r3" type="radio" name="group2" value="c" checked>
+            </form>
+            "#,
+        )
+        .unwrap();
+        let r1 = doc.element_by_id("r1").unwrap();
+        let r2 = doc.element_by_id("r2").unwrap();
+        let r3 = doc.element_by_id("r3").unwrap();
+
+        assert!(doc.get_attr(r1, "checked").is_some());
+        assert!(doc.get_attr(r2, "checked").is_none());
+        assert!(doc.get_attr(r3, "checked").is_some());
+
+        doc.select_radio(r2);
+
+        assert!(doc.get_attr(r1, "checked").is_none());
+        assert!(doc.get_attr(r2, "checked").is_some());
+        assert!(doc.get_attr(r3, "checked").is_some());
+    }
 }

@@ -53,6 +53,7 @@ struct Worker {
     images: Vec<Pixels>,
     image_ids: HashMap<String, u32>,
     published_images: bool,
+    focused: Option<u32>,
 }
 
 impl Worker {
@@ -88,6 +89,7 @@ impl Worker {
                 if !valid_viewport(viewport) {
                     return Err("Invalid viewport.".into());
                 }
+                self.focused = None;
                 let include_images = !self.published_images || assets.is_some();
                 if include_images {
                     self.install_assets(assets.unwrap_or_default());
@@ -100,9 +102,56 @@ impl Worker {
                 if !valid_viewport(viewport) {
                     return Err("Invalid viewport.".into());
                 }
+                self.focused = None;
                 let session = self.session.as_mut().ok_or("No document is open.")?;
                 session.click(node, viewport)?;
                 self.finish_page(viewport, false, input, output)
+            }
+            Request::FormInput {
+                node,
+                value,
+                viewport,
+            } => {
+                if !valid_viewport(viewport) {
+                    return Err("Invalid viewport.".into());
+                }
+                self.focused = Some(node);
+                let session = self.session.as_mut().ok_or("No document is open.")?;
+                session.document_mut().set_attr(node as usize, "value", value);
+                self.finish_page(viewport, false, input, output)
+            }
+            Request::FormToggle { node, viewport } => {
+                if !valid_viewport(viewport) {
+                    return Err("Invalid viewport.".into());
+                }
+                let session = self.session.as_mut().ok_or("No document is open.")?;
+                session.document_mut().toggle_checkbox(node as usize);
+                self.finish_page(viewport, false, input, output)
+            }
+            Request::FormRadio { node, viewport } => {
+                if !valid_viewport(viewport) {
+                    return Err("Invalid viewport.".into());
+                }
+                let session = self.session.as_mut().ok_or("No document is open.")?;
+                session.document_mut().select_radio(node as usize);
+                self.finish_page(viewport, false, input, output)
+            }
+            Request::SubmitForm { node } => {
+                let session = self.session.as_ref().ok_or("No document is open.")?;
+                let document = session.document();
+                let form_id = document.form_for_node(node as usize).ok_or("No enclosing form found.")?;
+                let (action, _method, pairs) = document.serialize_form(form_id).ok_or("Failed to serialize form.")?;
+                let query = if pairs.is_empty() {
+                    String::new()
+                } else {
+                    let qs = pairs
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", web_engine::url_encode(k), web_engine::url_encode(v)))
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    format!("?{qs}")
+                };
+                Ok(Reply::Submitted { action, query })
             }
             Request::Probe {
                 private_file,
@@ -200,6 +249,10 @@ impl Worker {
                     height: image.height,
                 })
             },
+            self.focused.map(|id| web_engine::InputState {
+                focused: Some(id),
+                caret: usize::MAX,
+            }),
         )?;
         if page.height == 0.0
             && let Some(failure) = failure.filter(|failure| !failure.is_empty())
@@ -416,5 +469,120 @@ mod tests {
             general_purpose::STANDARD.encode(svg)
         );
         assert_eq!(data_image(&src).unwrap(), svg);
+    }
+
+    struct MockBrowserInput {
+        buffer: Vec<u8>,
+    }
+
+    impl Read for MockBrowserInput {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.buffer.is_empty() {
+                let msg = Request::Measured(Ok(display_list::TextMetrics {
+                    layout: 0,
+                    width: 50.0,
+                    height: 16.0,
+                    links: Vec::new(),
+                }));
+                let mut encoded = Vec::new();
+                transmit(&mut encoded, &msg).map_err(io::Error::other)?;
+                self.buffer = encoded;
+            }
+            let len = buf.len().min(self.buffer.len());
+            buf[..len].copy_from_slice(&self.buffer[..len]);
+            self.buffer.drain(..len);
+            Ok(len)
+        }
+    }
+
+    #[test]
+    fn test_worker_form_handling_and_submission() {
+        let mut worker = Worker::default();
+        let html = r#"
+            <form action="/search" method="GET">
+                <input type="text" id="q" name="query" value="initial">
+                <input type="checkbox" id="c" name="subscribe" checked>
+                <input type="radio" id="r1" name="opt" value="1">
+                <input type="radio" id="r2" name="opt" value="2" checked>
+                <input type="submit" id="btn" value="Go">
+            </form>
+        "#;
+        let mut mock_input = MockBrowserInput { buffer: Vec::new() };
+        let mut dummy_output = Vec::<u8>::new();
+        let reply = worker.handle(Request::Open(html.into()), &mut mock_input, &mut dummy_output).unwrap();
+        assert!(matches!(reply, Reply::Resources(_)));
+
+        let input_id = {
+            let session = worker.session.as_ref().unwrap();
+            session.document().element_by_id("q").unwrap() as u32
+        };
+        let toggle_id = {
+            let session = worker.session.as_ref().unwrap();
+            session.document().element_by_id("c").unwrap() as u32
+        };
+        let radio_id = {
+            let session = worker.session.as_ref().unwrap();
+            session.document().element_by_id("r1").unwrap() as u32
+        };
+
+        // FormInput
+        let reply_input = worker.handle(
+            Request::FormInput {
+                node: input_id,
+                value: "typed text".into(),
+                viewport: Viewport { width: 400.0, height: 300.0 },
+            },
+            &mut mock_input,
+            &mut dummy_output,
+        ).unwrap();
+        assert!(matches!(reply_input, Reply::Page(_)));
+        {
+            let session = worker.session.as_ref().unwrap();
+            assert_eq!(session.document().get_attr(input_id as usize, "value"), Some("typed text"));
+        }
+
+        // FormToggle
+        let reply_toggle = worker.handle(
+            Request::FormToggle {
+                node: toggle_id,
+                viewport: Viewport { width: 400.0, height: 300.0 },
+            },
+            &mut mock_input,
+            &mut dummy_output,
+        ).unwrap();
+        assert!(matches!(reply_toggle, Reply::Page(_)));
+        {
+            let session = worker.session.as_ref().unwrap();
+            assert_eq!(session.document().get_attr(toggle_id as usize, "checked"), None);
+        }
+
+        // FormRadio
+        let reply_radio = worker.handle(
+            Request::FormRadio {
+                node: radio_id,
+                viewport: Viewport { width: 400.0, height: 300.0 },
+            },
+            &mut mock_input,
+            &mut dummy_output,
+        ).unwrap();
+        assert!(matches!(reply_radio, Reply::Page(_)));
+        {
+            let session = worker.session.as_ref().unwrap();
+            assert_eq!(session.document().get_attr(radio_id as usize, "checked"), Some(""));
+        }
+
+        // SubmitForm
+        let submit_reply = worker.handle(
+            Request::SubmitForm { node: input_id },
+            &mut mock_input,
+            &mut dummy_output,
+        ).unwrap();
+        match submit_reply {
+            Reply::Submitted { action, query } => {
+                assert_eq!(action, "/search");
+                assert_eq!(query, "?query=typed+text&opt=1");
+            }
+            _ => panic!("Expected Reply::Submitted"),
+        }
     }
 }
