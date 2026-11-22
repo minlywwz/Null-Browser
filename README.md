@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Platform-Windows%2011%20x64-0078d4?style=for-the-badge&logo=windows11&logoColor=white" alt="Platform" />
   <img src="https://img.shields.io/badge/Rust-2024%20Edition-black?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/C%2B%2B-20%20%2F%20Direct3D%2011-00599c?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++" />
-  <img src="https://img.shields.io/badge/Tests-66%20passed-2ea44f?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-73%20passed-2ea44f?style=for-the-badge" alt="Tests" />
   <img src="https://img.shields.io/badge/Code-17.3k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
 </p>

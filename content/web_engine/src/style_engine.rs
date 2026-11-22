@@ -220,11 +220,41 @@ impl Style {
                 style.margin[0] = Length::Em(0.5);
                 style.margin[2] = Length::Em(0.5);
             }
-            "input" if node.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("hidden")) => {
+            "input"
+                if node
+                    .attr("type")
+                    .is_some_and(|t| t.eq_ignore_ascii_case("hidden")) =>
+            {
                 style.display = Display::None;
                 return style;
             }
-            "button" | "input" | "textarea" | "select" => {
+            "input"
+                if node.attr("type").is_some_and(|t| {
+                    t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")
+                }) =>
+            {
+                style.display = Display::InlineBlock;
+                style.padding = [
+                    Length::Px(2.0),
+                    Length::Px(4.0),
+                    Length::Px(2.0),
+                    Length::Px(4.0),
+                ];
+            }
+            "button" | "input" | "select" => {
+                style.display = Display::InlineBlock;
+                style.padding = [
+                    Length::Px(6.0),
+                    Length::Px(12.0),
+                    Length::Px(6.0),
+                    Length::Px(12.0),
+                ];
+                style.background = Color::rgb(0xf4f6f8);
+                style.border = 1.0;
+                style.border_color = Color::rgb(0xc5cad3);
+                style.radius = 6.0;
+            }
+            "textarea" => {
                 style.display = Display::Block;
                 style.padding = [
                     Length::Px(6.0),
@@ -236,9 +266,7 @@ impl Style {
                 style.border = 1.0;
                 style.border_color = Color::rgb(0xc5cad3);
                 style.radius = 6.0;
-                if tag == "textarea" {
-                    style.white_space = WhiteSpace::PreWrap;
-                }
+                style.white_space = WhiteSpace::PreWrap;
             }
             "option" | "optgroup" => style.display = Display::None,
             "noscript" if document.scripting => {
@@ -256,8 +284,16 @@ impl Style {
                 };
                 let w = size("width");
                 let h = size("height");
-                style.width = if w != Length::Auto { w } else { Length::Px(320.0) };
-                style.height = if h != Length::Auto { h } else { Length::Px(180.0) };
+                style.width = if w != Length::Auto {
+                    w
+                } else {
+                    Length::Px(320.0)
+                };
+                style.height = if h != Length::Auto {
+                    h
+                } else {
+                    Length::Px(180.0)
+                };
             }
             "audio" => {
                 style.display = Display::Block;
@@ -270,8 +306,16 @@ impl Style {
                 };
                 let w = size("width");
                 let h = size("height");
-                style.width = if w != Length::Auto { w } else { Length::Px(300.0) };
-                style.height = if h != Length::Auto { h } else { Length::Px(40.0) };
+                style.width = if w != Length::Auto {
+                    w
+                } else {
+                    Length::Px(300.0)
+                };
+                style.height = if h != Length::Auto {
+                    h
+                } else {
+                    Length::Px(40.0)
+                };
             }
             // These elements are deliberately inert in the supported subset.
             "head" | "title" | "style" | "script" | "meta" | "base" | "link" | "template"

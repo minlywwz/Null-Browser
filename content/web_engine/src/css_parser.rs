@@ -18,7 +18,9 @@ pub fn parse_font_faces(source: &str) -> Vec<FontFace> {
     let source = strip_comments(source);
     let mut faces = Vec::new();
     let mut rest = source.as_str();
-    while faces.len() < 64 && let Some((prelude, tail)) = rest.split_once('{') {
+    while faces.len() < 64
+        && let Some((prelude, tail)) = rest.split_once('{')
+    {
         let Some(end) = matching_end(tail) else { break };
         let prelude = prelude.rsplit(';').next().unwrap_or(prelude).trim();
         let body = &tail[..end];
@@ -26,7 +28,9 @@ pub fn parse_font_faces(source: &str) -> Vec<FontFace> {
             let mut family = None;
             let mut src = None;
             for part in split_top_level(body, |c| c == ';').take(32) {
-                let Some((name, value)) = part.split_once(':') else { continue };
+                let Some((name, value)) = part.split_once(':') else {
+                    continue;
+                };
                 let name = name.trim().to_ascii_lowercase();
                 let value = value.trim();
                 match name.as_str() {
@@ -111,7 +115,7 @@ fn custom_properties(source: &str) -> HashMap<String, String> {
             b'{' | b';' if paren == 0 => {
                 index += 1;
                 if let Some((name, value, next)) = custom_declaration(bytes, index) {
-                    map.insert(name, value);
+                    map.entry(name).or_insert(value);
                     index = next;
                 }
                 continue;
@@ -547,18 +551,25 @@ impl Length {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Display {
     None,
     Inline,
     Block,
+    InlineBlock,
     Flex,
     Grid,
 }
 
 impl Display {
+    /// Block-level boxes force a new line in normal flow.
     pub(crate) fn is_block(self) -> bool {
         matches!(self, Self::Block | Self::Flex | Self::Grid)
+    }
+
+    /// Inline-level boxes that size like a block but flow with text.
+    pub(crate) fn is_inline_block(self) -> bool {
+        self == Self::InlineBlock
     }
 }
 
@@ -1246,9 +1257,8 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             "display" => match value {
                 "none" => Some(D::Display(Display::None)),
                 "inline" => Some(D::Display(Display::Inline)),
-                "block" | "flow-root" | "list-item" | "inline-block" => {
-                    Some(D::Display(Display::Block))
-                }
+                "inline-block" => Some(D::Display(Display::InlineBlock)),
+                "block" | "flow-root" | "list-item" => Some(D::Display(Display::Block)),
                 "grid" | "inline-grid" => Some(D::Display(Display::Grid)),
                 "flex" | "inline-flex" => Some(D::Display(Display::Flex)),
                 _ => None,
@@ -1260,19 +1270,35 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             "flex-shrink" => bounded(value, 0.0, 1024.0).map(D::FlexShrink),
             "flex" => {
                 let mut values = value.split_ascii_whitespace();
-                let factors = match (values.next(), values.next(), values.next(), values.next()) {
-                    (Some("none"), None, None, None) => Some((0.0, 0.0)),
-                    (Some("auto"), None, None, None) => Some((1.0, 1.0)),
-                    (Some(grow), Some(shrink), Some("auto"), None) => {
-                        bounded(grow, 0.0, 1024.0).zip(bounded(shrink, 0.0, 1024.0))
-                    }
-                    _ => None,
-                };
+                let (factors, basis_opt) =
+                    match (values.next(), values.next(), values.next(), values.next()) {
+                        (Some("none"), None, None, None) => (Some((0.0, 0.0)), None),
+                        (Some("auto"), None, None, None) => (Some((1.0, 1.0)), None),
+                        (Some(grow), None, None, None) => {
+                            (bounded(grow, 0.0, 1024.0).map(|g| (g, 1.0)), None)
+                        }
+                        (Some(grow), Some(shrink), None, None) => (
+                            bounded(grow, 0.0, 1024.0).zip(bounded(shrink, 0.0, 1024.0)),
+                            None,
+                        ),
+                        (Some(grow), Some(shrink), Some(basis), None) => (
+                            bounded(grow, 0.0, 1024.0).zip(bounded(shrink, 0.0, 1024.0)),
+                            Some(basis),
+                        ),
+                        _ => (None, None),
+                    };
                 if let Some((grow, shrink)) = factors {
                     expanded.extend([D::FlexGrow(grow), D::FlexShrink(shrink)]);
                 }
+                if let Some(basis) = basis_opt
+                    && let Some(basis_len) = length(basis)
+                    && basis_len != Length::Auto
+                {
+                    expanded.push(D::Width(basis_len));
+                }
                 None
             }
+            "flex-basis" => length(value).filter(|l| *l != Length::Auto).map(D::Width),
             "position" => match value {
                 "relative" => Some(D::Position(Position::Relative)),
                 "absolute" | "fixed" => Some(D::Position(Position::Absolute)),
@@ -1331,31 +1357,27 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
                     .filter(|weight| (100..=900).contains(weight))
                     .map(D::FontWeight),
             },
-            "font-family" => {
-                value
-                    .split(',')
-                    .find_map(|family| {
-                        let name = family.trim().trim_matches(['\'', '"']).trim();
-                        if let Some(index) = custom_fonts
-                            .iter()
-                            .position(|face| face.family.eq_ignore_ascii_case(name))
-                        {
-                            return Some(D::FontFamily(FontFamily::custom(index as u32)));
-                        }
-                        match name {
-                            "serif" | "times new roman" | "georgia" => {
-                                Some(D::FontFamily(FontFamily::Serif))
-                            }
-                            "monospace" | "consolas" | "courier" | "courier new" => {
-                                Some(D::FontFamily(FontFamily::Monospace))
-                            }
-                            "sans-serif" | "system-ui" | "segoe ui" | "arial" => {
-                                Some(D::FontFamily(FontFamily::SansSerif))
-                            }
-                            _ => None,
-                        }
-                    })
-            }
+            "font-family" => value.split(',').find_map(|family| {
+                let name = family.trim().trim_matches(['\'', '"']).trim();
+                if let Some(index) = custom_fonts
+                    .iter()
+                    .position(|face| face.family.eq_ignore_ascii_case(name))
+                {
+                    return Some(D::FontFamily(FontFamily::custom(index as u32)));
+                }
+                match name {
+                    "serif" | "times new roman" | "georgia" => {
+                        Some(D::FontFamily(FontFamily::Serif))
+                    }
+                    "monospace" | "consolas" | "courier" | "courier new" => {
+                        Some(D::FontFamily(FontFamily::Monospace))
+                    }
+                    "sans-serif" | "system-ui" | "segoe ui" | "arial" => {
+                        Some(D::FontFamily(FontFamily::SansSerif))
+                    }
+                    _ => None,
+                }
+            }),
             "font-style" if matches!(value, "normal" | "italic" | "oblique") => {
                 Some(D::Italic(value != "normal"))
             }
@@ -1549,5 +1571,117 @@ mod tests {
             })
             .unwrap();
         assert_eq!(code_family, FontFamily::Monospace);
+    }
+
+    #[test]
+    fn custom_properties_preserves_first_entry() {
+        let css = r#"
+            :root {
+                --color-base: #202122;
+                --theme: light;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --color-base: #ffffff;
+                    --dark-only: yes;
+                }
+            }
+            body {
+                color: var(--color-base);
+            }
+        "#;
+        let tokens = custom_properties(css);
+        assert_eq!(
+            tokens.get("--color-base").map(String::as_str),
+            Some("#202122")
+        );
+        assert_eq!(tokens.get("--theme").map(String::as_str), Some("light"));
+        assert_eq!(tokens.get("--dark-only").map(String::as_str), Some("yes"));
+
+        let (rules, _) = parse_stylesheet(
+            css,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+        .unwrap();
+        let body_rule = rules
+            .iter()
+            .find(|r| r.selector.parts[0].tag.as_deref() == Some("body"))
+            .unwrap();
+        let color_decl = body_rule
+            .declarations
+            .iter()
+            .find_map(|d| match d.value {
+                Declaration::Color(c) => Some(c),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(color_decl, Color::rgb(0x202122));
+    }
+
+    #[test]
+    fn parses_flex_shorthand_variants() {
+        // Test flex: 1
+        let decls_grow_only = parse_inline("flex: 1", &HashMap::new(), &[]);
+        let grow = decls_grow_only.iter().find_map(|d| match d.value {
+            Declaration::FlexGrow(g) => Some(g),
+            _ => None,
+        });
+        let shrink = decls_grow_only.iter().find_map(|d| match d.value {
+            Declaration::FlexShrink(s) => Some(s),
+            _ => None,
+        });
+        assert_eq!(grow, Some(1.0));
+        assert_eq!(shrink, Some(1.0));
+
+        // Test flex: 1 1 46%
+        let decls_with_basis = parse_inline("flex: 1 1 46%", &HashMap::new(), &[]);
+        let grow2 = decls_with_basis.iter().find_map(|d| match d.value {
+            Declaration::FlexGrow(g) => Some(g),
+            _ => None,
+        });
+        let shrink2 = decls_with_basis.iter().find_map(|d| match d.value {
+            Declaration::FlexShrink(s) => Some(s),
+            _ => None,
+        });
+        let width2 = decls_with_basis.iter().find_map(|d| match d.value {
+            Declaration::Width(w) => Some(w),
+            _ => None,
+        });
+        assert_eq!(grow2, Some(1.0));
+        assert_eq!(shrink2, Some(1.0));
+        assert_eq!(width2, Some(Length::Percent(46.0)));
+
+        // Test flex: 2 0 200px
+        let decls_fixed_basis = parse_inline("flex: 2 0 200px", &HashMap::new(), &[]);
+        let grow3 = decls_fixed_basis.iter().find_map(|d| match d.value {
+            Declaration::FlexGrow(g) => Some(g),
+            _ => None,
+        });
+        let shrink3 = decls_fixed_basis.iter().find_map(|d| match d.value {
+            Declaration::FlexShrink(s) => Some(s),
+            _ => None,
+        });
+        let width3 = decls_fixed_basis.iter().find_map(|d| match d.value {
+            Declaration::Width(w) => Some(w),
+            _ => None,
+        });
+        assert_eq!(grow3, Some(2.0));
+        assert_eq!(shrink3, Some(0.0));
+        assert_eq!(width3, Some(Length::Px(200.0)));
+    }
+
+    #[test]
+    fn parses_inline_block_display() {
+        let decls = parse_inline("display: inline-block", &HashMap::new(), &[]);
+        let display = decls.iter().find_map(|d| match d.value {
+            Declaration::Display(d) => Some(d),
+            _ => None,
+        });
+        assert_eq!(display, Some(Display::InlineBlock));
+        assert!(!Display::InlineBlock.is_block());
+        assert!(Display::InlineBlock.is_inline_block());
     }
 }

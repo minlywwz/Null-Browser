@@ -139,7 +139,9 @@ fn painted_height(commands: &[Command]) -> f32 {
                 clips.pop();
                 continue;
             }
-            Command::Fill { rect, .. } | Command::Image { rect, .. } | Command::Video { rect, .. } => rect,
+            Command::Fill { rect, .. }
+            | Command::Image { rect, .. }
+            | Command::Video { rect, .. } => rect,
             Command::Text { bounds, .. } => bounds,
         };
         let visible = match clips.last() {
@@ -161,6 +163,90 @@ fn paint(color: Color, opacity: f32) -> Color {
             alpha: (color.alpha * opacity).clamp(0.0, 1.0),
             ..color
         }
+    }
+}
+
+/// Text that a form control paints without laying out its children.
+fn control_label(document: &Document, id: NodeId) -> Option<String> {
+    let node = &document.nodes[id];
+    match node.name() {
+        "input" => {
+            let kind = node.attr("type").unwrap_or("text").to_ascii_lowercase();
+            let value = node.attr("value").unwrap_or("");
+            let placeholder = node.attr("placeholder").unwrap_or("");
+            Some(match kind.as_str() {
+                "submit" | "reset" => if value.is_empty() { "Submit" } else { value }.to_owned(),
+                "button" => value.to_owned(),
+                "checkbox" => if node.attr("checked").is_some() {
+                    "☑"
+                } else {
+                    "☐"
+                }
+                .to_owned(),
+                "radio" => if node.attr("checked").is_some() {
+                    "◉"
+                } else {
+                    "○"
+                }
+                .to_owned(),
+                "password" => {
+                    if value.is_empty() {
+                        placeholder.to_owned()
+                    } else {
+                        "••••".to_owned()
+                    }
+                }
+                _ => {
+                    if value.is_empty() {
+                        placeholder.to_owned()
+                    } else {
+                        value.to_owned()
+                    }
+                }
+            })
+        }
+        "select" => {
+            let mut options: Vec<NodeId> = Vec::new();
+            for &child in &node.children {
+                let child_node = &document.nodes[child];
+                if child_node.name() == "optgroup" {
+                    options.extend(
+                        child_node
+                            .children
+                            .iter()
+                            .copied()
+                            .filter(|id| document.nodes[*id].name() == "option"),
+                    );
+                } else if child_node.name() == "option" {
+                    options.push(child);
+                }
+            }
+            let selected = options
+                .iter()
+                .copied()
+                .find(|id| document.nodes[*id].attr("selected").is_some())
+                .or_else(|| options.first().copied());
+            selected.map(|id| {
+                document.nodes[id]
+                    .attr("label")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| document.text_of(id))
+            })
+        }
+        "button" => {
+            let text = document.text_of(id);
+            if text.trim().is_empty() {
+                Some(
+                    node.attr("value")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("Submit")
+                        .to_owned(),
+                )
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
     }
 }
 
@@ -279,6 +365,13 @@ struct FlexItem {
     max_width: f32,
 }
 
+/// Size of one poured run of inline text.
+#[derive(Clone, Copy)]
+struct TextFlow {
+    width: f32,
+    height: f32,
+}
+
 struct Layout<'a, T, I> {
     document: &'a Document,
     styles: Vec<Style>,
@@ -309,10 +402,11 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         if style.display == Display::Grid {
             return self.grid(id, x, y, containing, href);
         }
-        let width = containing.width;
+        let width = containing.width.max(1.0);
         let origin_y = y;
         let start = y;
-        let spacing = if style.display == Display::Flex {
+        let column = style.display == Display::Flex;
+        let spacing = if column {
             style.gap[0]
                 .resolve(width, self.viewport, style.text.size)
                 .unwrap_or(0.0)
@@ -322,24 +416,32 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         };
         let mut flowed = false;
         let mut inline = InlineText::new();
+        let mut cursor = x;
+        let mut line_height: f32 = 0.0;
         for child in &self.document.nodes[id].children {
             if self.styles[*child].position == Position::Absolute {
                 if self.styles[*child].display != Display::None {
-                    y += self.flush(&mut inline, style, x, y, width)?;
+                    let text =
+                        self.flush(&mut inline, style, cursor, y, (x + width - cursor).max(1.0))?;
+                    line_height = line_height.max(text.height);
+                    y += line_height;
+                    cursor = x;
+                    line_height = 0.0;
                     self.place_absolute(*child, x, origin_y, y, containing, href)?;
                 }
                 continue;
             }
             let node = &self.document.nodes[*child];
-            let display = self.styles[*child].display;
+            let mut display = self.styles[*child].display;
+            if column && display.is_inline_block() {
+                // Flex items are blockified: each one occupies its own line.
+                display = Display::Block;
+            }
             let has_block_content = node.name() == "img"
                 || node.name() == "video"
                 || node.name() == "audio"
-                || style.display == Display::Flex && matches!(&node.kind, Kind::Element { .. })
-                || node
-                    .children
-                    .iter()
-                    .any(|id| self.styles[*id].display.is_block())
+                || column && matches!(&node.kind, Kind::Element { .. })
+                || node.children.iter().any(|id| self.subtree_has_box(*id))
                 || self.document.clickable.contains(child);
             match if display == Display::Inline && has_block_content {
                 Display::Block
@@ -347,22 +449,74 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 display
             } {
                 Display::None => {}
+                Display::Inline => self.collect(*child, &mut inline, href, y)?,
+                Display::InlineBlock => {
+                    let text =
+                        self.flush(&mut inline, style, cursor, y, (x + width - cursor).max(1.0))?;
+                    cursor += text.width;
+                    line_height = line_height.max(text.height);
+                    if text.height > style.text.size * 1.6 {
+                        // The run wrapped inside the remaining width. Continue below it.
+                        y += text.height;
+                        cursor = x;
+                        line_height = 0.0;
+                    }
+                    let child_style = self.styles[*child];
+                    let font = child_style.text.size;
+                    let available = containing.width.max(1.0);
+                    let outer_width = self.outer_width(*child, false)?.clamp(1.0, available);
+                    let resolve = |length: Length| {
+                        length
+                            .resolve(available, self.viewport, font)
+                            .unwrap_or(0.0)
+                    };
+                    let outer = resolve(child_style.margin[3])
+                        + outer_width
+                        + resolve(child_style.margin[1]);
+                    if cursor > x + 0.01 && cursor + outer > x + width + 0.01 {
+                        y += line_height.max(style.text.size);
+                        cursor = x;
+                        line_height = 0.0;
+                    }
+                    let child_height =
+                        self.block(*child, cursor, y, containing, Some(outer_width), href)?;
+                    cursor += outer;
+                    line_height = line_height.max(child_height);
+                }
                 Display::Block | Display::Flex | Display::Grid => {
-                    y += self.flush(&mut inline, style, x, y, width)?;
+                    let text =
+                        self.flush(&mut inline, style, cursor, y, (x + width - cursor).max(1.0))?;
+                    line_height = line_height.max(text.height);
+                    y += line_height;
+                    cursor = x;
+                    line_height = 0.0;
                     if flowed {
                         y += spacing;
                     }
                     y += self.block(*child, x, y, containing, None, href)?;
                     flowed = true;
                 }
-                Display::Inline => self.collect(*child, &mut inline, href, y)?,
             }
-            if y > MAX_HEIGHT {
+            if y + line_height > MAX_HEIGHT {
                 return Err("The document exceeds the maximum layout height.".into());
             }
         }
-        y += self.flush(&mut inline, style, x, y, width)?;
+        let text = self.flush(&mut inline, style, cursor, y, (x + width - cursor).max(1.0))?;
+        line_height = line_height.max(text.height);
+        y += line_height;
         Ok(y - start)
+    }
+
+    /// True when this subtree contains a box that cannot be poured as plain text.
+    fn subtree_has_box(&self, id: NodeId) -> bool {
+        let display = self.styles[id].display;
+        if display.is_block() || display.is_inline_block() {
+            return true;
+        }
+        self.document.nodes[id]
+            .children
+            .iter()
+            .any(|child| self.subtree_has_box(*child))
     }
 
     fn grid(
@@ -426,6 +580,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 let mut inline = InlineText::new();
                 inline.append(text, href, child_style)?;
                 self.flush(&mut inline, child_style, cell_x, y, width)?
+                    .height
             } else {
                 self.block(
                     child,
@@ -515,6 +670,34 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .unwrap_or(300.0)
                     + padding
                     + border
+            } else if matches!(node.name(), "input" | "select" | "button") {
+                let label = if node.name() == "input"
+                    && matches!(
+                        node.attr("type")
+                            .unwrap_or("text")
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "text" | "search" | "password" | "email" | "url" | "tel" | "number"
+                    ) {
+                    let size = node
+                        .attr("size")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(20)
+                        .clamp(1, 200);
+                    "0".repeat(size)
+                } else {
+                    control_label(self.document, id).unwrap_or_default()
+                };
+                let intrinsic = if label.is_empty() {
+                    0.0
+                } else {
+                    let mut probe = InlineText::new();
+                    probe.append(&label, None, style)?;
+                    self.text
+                        .measure_styled(&probe.text, style.text, 16_384.0, &[], &probe.runs, false)?
+                        .width
+                };
+                intrinsic + padding + border
             } else {
                 let row = style.display == Display::Flex && !style.flex_column;
                 let mut widest: f32 = 0.0;
@@ -671,6 +854,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 let mut inline = InlineText::new();
                 inline.append(text, href, self.styles[item.id])?;
                 self.flush(&mut inline, self.styles[item.id], x, y, item.width)?
+                    .height
             } else {
                 self.block(item.id, x, y, containing, Some(item.width), href)?
             };
@@ -779,9 +963,12 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         x: f32,
         y: f32,
         width: f32,
-    ) -> Result<f32, String> {
+    ) -> Result<TextFlow, String> {
         if inline.text.is_empty() {
-            return Ok(0.0);
+            return Ok(TextFlow {
+                width: 0.0,
+                height: 0.0,
+            });
         }
         let ranges: Vec<_> = inline.links.iter().map(|(_, range)| *range).collect();
         let text = self.text.measure_styled(
@@ -805,8 +992,18 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             color: paint(style.color, if style.visible { style.opacity } else { 0.0 }),
             layout: text.layout,
         });
+        // A pending space is the separator before the next inline box.
+        // It was not painted, but it still advances the inline cursor.
+        let trailing_space = if inline.space.is_some() {
+            style.text.size * 0.25
+        } else {
+            0.0
+        };
         *inline = InlineText::new();
-        Ok(text.height)
+        Ok(TextFlow {
+            width: text.width + trailing_space,
+            height: text.height,
+        })
     }
 
     fn block(
@@ -958,6 +1155,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 content_y,
                 marker_width,
             )?
+            .height
         } else {
             0.0
         };
@@ -976,6 +1174,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 let mut alternative = InlineText::new();
                 alternative.append(node.attr("alt").unwrap_or(""), href, style)?;
                 self.flush(&mut alternative, style, content_x, content_y, width)?
+                    .height
             };
             (height, None, false)
         } else if node.name() == "video" {
@@ -1004,7 +1203,8 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 let has_controls = node.attr("controls").map_or(true, |v| v != "false");
                 if has_controls {
                     let bar_h = 32.0f32.min(height);
-                    let bar_rect = Rect::new(rect.x, rect.y + rect.height - bar_h, rect.width, bar_h);
+                    let bar_rect =
+                        Rect::new(rect.x, rect.y + rect.height - bar_h, rect.width, bar_h);
                     self.commands.push(Command::Fill {
                         rect: bar_rect,
                         color: Color::rgba(0x000000a0),
@@ -1034,7 +1234,11 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                         color: Color::rgba(0xffffff40),
                         radius: 2.0,
                     });
-                    let progress_w = if is_playing { line_w * 0.5 } else { line_w * 0.15 };
+                    let progress_w = if is_playing {
+                        line_w * 0.5
+                    } else {
+                        line_w * 0.15
+                    };
                     self.commands.push(Command::Fill {
                         rect: Rect::new(line_x, line_y, progress_w, 4.0),
                         color: Color::rgb(0x1a73e8),
@@ -1093,7 +1297,11 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     color: Color::rgba(0xffffff40),
                     radius: 2.0,
                 });
-                let progress_w = if is_playing { line_w * 0.5 } else { line_w * 0.15 };
+                let progress_w = if is_playing {
+                    line_w * 0.5
+                } else {
+                    line_w * 0.15
+                };
                 self.commands.push(Command::Fill {
                     rect: Rect::new(line_x, line_y, progress_w, 4.0),
                     color: Color::rgb(0x1a73e8),
@@ -1127,19 +1335,29 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     let text = if value.is_empty() { "Submit" } else { value };
                     (text.to_string(), Some(format!("ko4:submit:{id}")))
                 }
-                "button" => {
-                    (value.to_string(), Some(format!("ko4:click:{id}")))
-                }
+                "button" => (value.to_string(), Some(format!("ko4:click:{id}"))),
                 "checkbox" => {
-                    let text = if node.attr("checked").is_some() { "☑" } else { "☐" };
+                    let text = if node.attr("checked").is_some() {
+                        "☑"
+                    } else {
+                        "☐"
+                    };
                     (text.to_string(), Some(format!("ko4:toggle:{id}")))
                 }
                 "radio" => {
-                    let text = if node.attr("checked").is_some() { "◉" } else { "○" };
+                    let text = if node.attr("checked").is_some() {
+                        "◉"
+                    } else {
+                        "○"
+                    };
                     (text.to_string(), Some(format!("ko4:radio:{id}")))
                 }
                 "password" => {
-                    let base = if !value.is_empty() { "••••" } else { placeholder };
+                    let base = if !value.is_empty() {
+                        "••••"
+                    } else {
+                        placeholder
+                    };
                     let text = if is_focused {
                         let char_count = base.chars().count();
                         let caret_idx = caret.min(char_count);
@@ -1160,7 +1378,11 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     (text, Some(format!("ko4:input:{id}")))
                 }
                 _ => {
-                    let base = if !value.is_empty() { value } else { placeholder };
+                    let base = if !value.is_empty() {
+                        value
+                    } else {
+                        placeholder
+                    };
                     let text = if is_focused {
                         let char_count = base.chars().count();
                         let caret_idx = caret.min(char_count);
@@ -1186,6 +1408,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             label.append(&text, None, style)?;
             let height = self
                 .flush(&mut label, style, content_x, content_y, width)?
+                .height
                 .max(style.text.size);
             (height, control_link, is_focused)
         } else if node.name() == "button" {
@@ -1201,13 +1424,14 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 format!("ko4:click:{id}")
             });
 
-            let has_text_children = node.children.iter().any(|&child_id| {
-                match &self.document.nodes[child_id].kind {
-                    Kind::Text(t) => !t.trim().is_empty(),
-                    Kind::Element { .. } => !self.document.text_of(child_id).trim().is_empty(),
-                    _ => false,
-                }
-            });
+            let has_text_children =
+                node.children
+                    .iter()
+                    .any(|&child_id| match &self.document.nodes[child_id].kind {
+                        Kind::Text(t) => !t.trim().is_empty(),
+                        Kind::Element { .. } => !self.document.text_of(child_id).trim().is_empty(),
+                        _ => false,
+                    });
 
             let content_height = if has_text_children {
                 self.children(
@@ -1228,6 +1452,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .unwrap_or("Submit");
                 label.append(text, None, style)?;
                 self.flush(&mut label, style, content_x, content_y, width)?
+                    .height
                     .max(style.text.size)
             };
             (content_height, control_link, false)
@@ -1271,6 +1496,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             label.append(&text, None, style)?;
             let height = self
                 .flush(&mut label, style, content_x, content_y, width)?
+                .height
                 .max(style.text.size * 2.0);
             (height, control_link, is_focused)
         } else if node.name() == "select" {
@@ -1303,7 +1529,9 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     }
                 }
             }
-            let height = self.flush(&mut label, style, content_x, content_y, width)?
+            let height = self
+                .flush(&mut label, style, content_x, content_y, width)?
+                .height
                 .max(style.text.size);
             (height, None, false)
         } else {
@@ -1994,7 +2222,10 @@ mod tests {
             Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8) => true,
             _ => false,
         });
-        assert!(!accent_fill, "unfocused input should not have accent outline");
+        assert!(
+            !accent_fill,
+            "unfocused input should not have accent outline"
+        );
 
         // 2. Focused with caret at position 2
         let mut measurer = TextCapture(Vec::new());
@@ -2054,17 +2285,149 @@ mod tests {
 
         let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
 
-        let sub_link = result.links.iter().find(|l| l.href == format!("ko4:submit:{b_sub}"));
+        let sub_link = result
+            .links
+            .iter()
+            .find(|l| l.href == format!("ko4:submit:{b_sub}"));
         assert!(sub_link.is_some());
 
-        let custom_link = result.links.iter().find(|l| l.href == format!("ko4:click:{b_custom}"));
+        let custom_link = result
+            .links
+            .iter()
+            .find(|l| l.href == format!("ko4:click:{b_custom}"));
         assert!(custom_link.is_some());
 
-        let empty_link = result.links.iter().find(|l| l.href == format!("ko4:submit:{b_empty}"));
+        let empty_link = result
+            .links
+            .iter()
+            .find(|l| l.href == format!("ko4:submit:{b_empty}"));
         assert!(empty_link.is_some());
 
-        let out_link = result.links.iter().find(|l| l.href == format!("ko4:click:{b_out}"));
+        let out_link = result
+            .links
+            .iter()
+            .find(|l| l.href == format!("ko4:click:{b_out}"));
         assert!(out_link.is_some());
+    }
+
+    #[test]
+    fn inline_blocks_shrink_to_fit_and_wrap() {
+        let page = parse_html(
+            r#"<body style="margin:0">
+                <button id="one">One</button><button id="two">Two</button>
+                <div id="red" style="display:inline-block;width:30px;height:10px;background:red"></div>
+                <div id="blue" style="display:inline-block;width:30px;height:10px;background:blue"></div>
+            </body>"#,
+        )
+        .unwrap();
+        let result = layout(&page, 120.0, &mut FixedText, |_| None, None).unwrap();
+        let link = |id: &str| {
+            let node = page.element_by_id(id).unwrap();
+            result
+                .links
+                .iter()
+                .find(|link| link.href == format!("ko4:click:{node}"))
+        };
+        let one = link("one").expect("first button");
+        let two = link("two").expect("second button");
+        assert_eq!(one.rect.x, 0.0);
+        assert_eq!(two.rect.x, one.rect.x + one.rect.width);
+        assert_eq!(two.rect.y, one.rect.y);
+        assert!(one.rect.width < 120.0, "{:?}", one.rect);
+
+        let fill = |color: Color| {
+            result
+                .display_list
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    Command::Fill {
+                        rect, color: fill, ..
+                    } if *fill == color => Some(*rect),
+                    _ => None,
+                })
+        };
+        let red = fill(Color::rgb(0xff0000)).expect("red box");
+        let blue = fill(Color::rgb(0x0000ff)).expect("blue box");
+        assert_eq!(red, Rect::new(0.0, one.rect.height, 30.0, 10.0));
+        assert_eq!(blue, Rect::new(30.0, one.rect.height, 30.0, 10.0));
+    }
+
+    #[test]
+    fn text_and_inline_block_share_a_line() {
+        let page = parse_html(
+            r#"<body style="margin:0"><p style="margin:0">Hello <input id="go" type="submit" value="Go"> world</p></body>"#,
+        )
+        .unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
+        let go = page.element_by_id("go").unwrap();
+        let button = result
+            .links
+            .iter()
+            .find(|link| link.href == format!("ko4:submit:{go}"))
+            .expect("submit link");
+        assert!(button.rect.x >= 40.0, "{:?}", button.rect);
+        assert_eq!(button.rect.y, 0.0);
+
+        let text: Vec<_> = result
+            .display_list
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Text { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text[0].x, 0.0);
+        assert_eq!(text[0].y, button.rect.y);
+        let after = text
+            .iter()
+            .find(|bounds| bounds.x >= button.rect.x + button.rect.width - 1.0);
+        assert!(after.is_some(), "{text:?} {:?}", button.rect);
+    }
+
+    #[test]
+    fn an_inline_block_inside_a_label_keeps_its_box() {
+        let page = parse_html(
+            r#"<body style="margin:0"><label><input id="check" type="checkbox"> Remember</label></body>"#,
+        )
+        .unwrap();
+        let result = layout(&page, 300.0, &mut FixedText, |_| None, None).unwrap();
+        let check = page.element_by_id("check").unwrap();
+        let link = result
+            .links
+            .iter()
+            .find(|link| link.href == format!("ko4:toggle:{check}"))
+            .expect("checkbox link");
+        assert_eq!(link.rect.x, 0.0);
+        assert!(link.rect.width <= 20.0, "{:?}", link.rect);
+
+        let label_text = result
+            .display_list
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                Command::Text { bounds, .. } if bounds.x >= link.rect.x + link.rect.width => {
+                    Some(*bounds)
+                }
+                _ => None,
+            });
+        assert!(label_text.is_some(), "missing label text");
+    }
+
+    #[test]
+    fn text_inputs_get_a_default_writing_width() {
+        let page = parse_html(r#"<body style="margin:0"><input id="name"></body>"#).unwrap();
+        let result = layout(&page, 400.0, &mut FixedText, |_| None, None).unwrap();
+        let name = page.element_by_id("name").unwrap();
+        let link = result
+            .links
+            .iter()
+            .find(|link| link.href == format!("ko4:input:{name}"))
+            .expect("input link");
+        assert_eq!(link.rect.x, 0.0);
+        assert!(link.rect.width >= 150.0, "{:?}", link.rect);
+        assert!(link.rect.width < 400.0, "{:?}", link.rect);
     }
 
     #[test]
@@ -2083,14 +2446,25 @@ mod tests {
             }
         }
 
-        let page = parse_html(r#"<textarea id="ta">First line&#10;Second line</textarea>"#).unwrap();
+        let page =
+            parse_html(r#"<textarea id="ta">First line&#10;Second line</textarea>"#).unwrap();
         let ta = page.element_by_id("ta").unwrap();
 
         let mut measurer = TextCapture(Vec::new());
         let result = layout(&page, 400.0, &mut measurer, |_| None, None).unwrap();
 
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:input:{ta}")));
-        assert!(measurer.0.iter().any(|t| t.contains("First line\nSecond line")));
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:input:{ta}"))
+        );
+        assert!(
+            measurer
+                .0
+                .iter()
+                .any(|t| t.contains("First line\nSecond line"))
+        );
     }
 
     #[test]
@@ -2125,24 +2499,48 @@ mod tests {
         let mut measurer = TextCapture(Vec::new());
         let result = layout(&page, 800.0, &mut measurer, |_| None, None).unwrap();
 
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v1}")));
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v2}")));
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{v3}")));
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:media:toggle:{v1}"))
+        );
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:media:toggle:{v2}"))
+        );
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:media:toggle:{v3}"))
+        );
 
         let v1_cmd = result.display_list.commands.iter().find(|cmd| {
             matches!(cmd, Command::Video { rect, player } if *player == v1 as u32 && rect.width == 400.0 && rect.height == 225.0)
         });
-        assert!(v1_cmd.is_some(), "v1 Command::Video with 400x225 should exist");
+        assert!(
+            v1_cmd.is_some(),
+            "v1 Command::Video with 400x225 should exist"
+        );
 
         let v2_cmd = result.display_list.commands.iter().find(|cmd| {
             matches!(cmd, Command::Video { rect, player } if *player == v2 as u32 && rect.width == 320.0 && rect.height == 180.0)
         });
-        assert!(v2_cmd.is_some(), "v2 Command::Video with default 320x180 should exist");
+        assert!(
+            v2_cmd.is_some(),
+            "v2 Command::Video with default 320x180 should exist"
+        );
 
         let v1_controls_bar = result.display_list.commands.iter().find(|cmd| {
             matches!(cmd, Command::Fill { rect, color, .. } if rect.width == 400.0 && rect.height == 32.0 && *color == Color::rgba(0x000000a0))
         });
-        assert!(v1_controls_bar.is_some(), "Controls bar for v1 should exist");
+        assert!(
+            v1_controls_bar.is_some(),
+            "Controls bar for v1 should exist"
+        );
 
         assert!(measurer.0.contains(&"▶".to_string()));
         assert!(measurer.0.contains(&"❚❚".to_string()));
@@ -2178,13 +2576,26 @@ mod tests {
         let mut measurer = TextCapture(Vec::new());
         let result = layout(&page, 800.0, &mut measurer, |_| None, None).unwrap();
 
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{a1}")));
-        assert!(result.links.iter().any(|l| l.href == format!("ko4:media:toggle:{a2}")));
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:media:toggle:{a1}"))
+        );
+        assert!(
+            result
+                .links
+                .iter()
+                .any(|l| l.href == format!("ko4:media:toggle:{a2}"))
+        );
 
         let a1_bar = result.display_list.commands.iter().find(|cmd| {
             matches!(cmd, Command::Fill { rect, color, radius } if rect.width == 300.0 && rect.height == 40.0 && *radius == 20.0 && *color == Color::rgb(0x1a202c))
         });
-        assert!(a1_bar.is_some(), "Audio rounded bar with 300x40 and radius 20 should exist");
+        assert!(
+            a1_bar.is_some(),
+            "Audio rounded bar with 300x40 and radius 20 should exist"
+        );
 
         assert!(measurer.0.contains(&"▶".to_string()));
         assert!(measurer.0.contains(&"❚❚".to_string()));
