@@ -694,9 +694,7 @@ impl Renderer {
         let url_u16: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
         let mut player = ptr::null_mut();
         check(
-            unsafe {
-                browser_media_player_create(self.0.as_ptr(), url_u16.as_ptr(), &mut player)
-            },
+            unsafe { browser_media_player_create(self.0.as_ptr(), url_u16.as_ptr(), &mut player) },
             "Create MediaPlayer",
         )?;
         let ptr = NonNull::new(player).ok_or("Rendering Engine returned no media player.")?;

@@ -1180,13 +1180,10 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         } else if node.name() == "video" {
             let width = if style.width != Length::Auto {
                 width
-            } else if let Some(w) = node
-                .attr("width")
-                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
-            {
-                w
             } else {
-                320.0
+                node.attr("width")
+                    .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    .unwrap_or(320.0)
             };
             let height = specified_height
                 .or_else(|| {
@@ -1200,7 +1197,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     rect,
                     player: id as u32,
                 });
-                let has_controls = node.attr("controls").map_or(true, |v| v != "false");
+                let has_controls = node.attr("controls").is_none_or(|v| v != "false");
                 if has_controls {
                     let bar_h = 32.0f32.min(height);
                     let bar_rect =
@@ -1250,13 +1247,10 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         } else if node.name() == "audio" {
             let width = if style.width != Length::Auto {
                 width
-            } else if let Some(w) = node
-                .attr("width")
-                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
-            {
-                w
             } else {
-                300.0
+                node.attr("width")
+                    .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+                    .unwrap_or(300.0)
             };
             let height = specified_height
                 .or_else(|| {
@@ -2218,10 +2212,10 @@ mod tests {
         let mut measurer = TextCapture(Vec::new());
         let result = layout(&page, 400.0, &mut measurer, |_| None, None).unwrap();
         assert!(measurer.0.contains(&"hello".to_string()));
-        let accent_fill = result.display_list.commands.iter().any(|c| match c {
-            Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8) => true,
-            _ => false,
-        });
+        let accent_fill =
+            result.display_list.commands.iter().any(
+                |c| matches!(c, Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8)),
+            );
         assert!(
             !accent_fill,
             "unfocused input should not have accent outline"
@@ -2239,10 +2233,10 @@ mod tests {
             "captured: {:?}",
             measurer.0
         );
-        let accent_fill = result.display_list.commands.iter().any(|c| match c {
-            Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8) => true,
-            _ => false,
-        });
+        let accent_fill =
+            result.display_list.commands.iter().any(
+                |c| matches!(c, Command::Fill { color, .. } if *color == Color::rgb(0x1a73e8)),
+            );
         assert!(accent_fill, "focused input should have accent outline");
 
         // 3. Focused with caret at start (0)

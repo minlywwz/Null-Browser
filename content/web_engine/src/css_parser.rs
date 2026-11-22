@@ -48,13 +48,12 @@ pub fn parse_font_faces(source: &str) -> Vec<FontFace> {
                     _ => {}
                 }
             }
-            if let (Some(family), Some(src)) = (family, src) {
-                if !faces
+            if let (Some(family), Some(src)) = (family, src)
+                && !faces
                     .iter()
                     .any(|f: &FontFace| f.family.eq_ignore_ascii_case(&family) && f.src == src)
-                {
-                    faces.push(FontFace { family, src });
-                }
+            {
+                faces.push(FontFace { family, src });
             }
         }
         rest = &tail[end + 1..];

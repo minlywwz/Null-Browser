@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::css_parser::FontFace;
 
 pub type NodeId = usize;
+pub type FormData = (String, String, Vec<(String, String)>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamMarker {
@@ -421,25 +422,25 @@ impl Document {
     }
 
     pub fn set_attr(&mut self, node: NodeId, key: &str, value: String) {
-        if let Some(node) = self.nodes.get_mut(node) {
-            if let Kind::Element { attributes, .. } = &mut node.kind {
-                if let Some((_, existing)) = attributes
-                    .iter_mut()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
-                {
-                    *existing = value;
-                } else {
-                    attributes.push((key.to_ascii_lowercase(), value));
-                }
+        if let Some(node) = self.nodes.get_mut(node)
+            && let Kind::Element { attributes, .. } = &mut node.kind
+        {
+            if let Some((_, existing)) = attributes
+                .iter_mut()
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            {
+                *existing = value;
+            } else {
+                attributes.push((key.to_ascii_lowercase(), value));
             }
         }
     }
 
     pub fn remove_attr(&mut self, node: NodeId, key: &str) {
-        if let Some(node) = self.nodes.get_mut(node) {
-            if let Kind::Element { attributes, .. } = &mut node.kind {
-                attributes.retain(|(name, _)| !name.eq_ignore_ascii_case(key));
-            }
+        if let Some(node) = self.nodes.get_mut(node)
+            && let Kind::Element { attributes, .. } = &mut node.kind
+        {
+            attributes.retain(|(name, _)| !name.eq_ignore_ascii_case(key));
         }
     }
 
@@ -474,7 +475,7 @@ impl Document {
         self.find_enclosing_form(node)
     }
 
-    pub fn serialize_form(&self, form_id: NodeId) -> Option<(String, String, Vec<(String, String)>)> {
+    pub fn serialize_form(&self, form_id: NodeId) -> Option<FormData> {
         let form_node = self.nodes.get(form_id)?;
         if form_node.name() != "form" {
             return None;
@@ -702,10 +703,7 @@ fn descendant(document: &Document, ancestor: NodeId, node: NodeId) -> bool {
 }
 
 pub(crate) fn is_inert(tag: &str) -> bool {
-    matches!(
-        tag,
-        "template" | "iframe" | "object" | "embed"
-    )
+    matches!(tag, "template" | "iframe" | "object" | "embed")
 }
 
 #[cfg(test)]
@@ -732,10 +730,8 @@ mod tests {
 
     #[test]
     fn test_find_enclosing_form() {
-        let doc = parse_html(
-            r#"<form id="f1"><div><input id="in1"></div></form><input id="in2">"#,
-        )
-        .unwrap();
+        let doc = parse_html(r#"<form id="f1"><div><input id="in1"></div></form><input id="in2">"#)
+            .unwrap();
         let f1 = doc.element_by_id("f1").unwrap();
         let in1 = doc.element_by_id("in1").unwrap();
         let in2 = doc.element_by_id("in2").unwrap();
@@ -792,7 +788,9 @@ mod tests {
 
     #[test]
     fn test_toggle_checkbox() {
-        let mut doc = parse_html(r#"<input id="c1" type="checkbox"><input id="c2" type="checkbox" checked>"#).unwrap();
+        let mut doc =
+            parse_html(r#"<input id="c1" type="checkbox"><input id="c2" type="checkbox" checked>"#)
+                .unwrap();
         let c1 = doc.element_by_id("c1").unwrap();
         let c2 = doc.element_by_id("c2").unwrap();
 

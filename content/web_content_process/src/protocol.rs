@@ -46,10 +46,7 @@ pub enum Reply {
     Measure(Text),
     Page(Snapshot),
     Probe(Probe),
-    Submitted {
-        action: String,
-        query: String,
-    },
+    Submitted { action: String, query: String },
     Error(String),
 }
 

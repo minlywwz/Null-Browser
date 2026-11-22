@@ -102,9 +102,9 @@ impl ScriptSession {
     pub fn set_fetch_handler(
         &mut self,
         handler: impl Fn(&str, &str, &str) -> Result<(u16, String, String), String>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) {
         self.page.borrow_mut().fetch_handler = Some(Arc::new(handler));
     }
@@ -584,10 +584,7 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
         ctx.clone(),
         |ctx: Ctx<'_>, key: String, value: String| -> rquickjs::Result<()> {
             with_host(&ctx, |page| {
-                if page.storage.len() < 10_000
-                    && key.len() <= 1024
-                    && value.len() <= 1024 * 1024
-                {
+                if page.storage.len() < 10_000 && key.len() <= 1024 && value.len() <= 1024 * 1024 {
                     page.storage.insert(key, value);
                 }
                 Ok(())
@@ -680,7 +677,8 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
         .map_err(|error| error.to_string())?;
     host.set("storageLength", storage_length)
         .map_err(|error| error.to_string())?;
-    host.set("fetch", fetch).map_err(|error| error.to_string())?;
+    host.set("fetch", fetch)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -726,20 +724,17 @@ fn fetch_host<'js>(
         Ok((st, st_text, b)) => (None, st, st_text, b),
         Err(e) => (Some(e), 0u16, String::new(), String::new()),
     };
-    let task = Function::new(
-        ctx.clone(),
-        move |ctx: Ctx<'_>| -> rquickjs::Result<()> {
-            if let Ok(func) = saved_callback.clone().restore(&ctx) {
-                let _ = func.call::<_, rquickjs::Value>((
-                    err.clone(),
-                    status,
-                    status_text.clone(),
-                    res_body.clone(),
-                ));
-            }
-            Ok(())
-        },
-    )?;
+    let task = Function::new(ctx.clone(), move |ctx: Ctx<'_>| -> rquickjs::Result<()> {
+        if let Ok(func) = saved_callback.clone().restore(&ctx) {
+            let _ = func.call::<_, rquickjs::Value>((
+                err.clone(),
+                status,
+                status_text.clone(),
+                res_body.clone(),
+            ));
+        }
+        Ok(())
+    })?;
     let saved_task = Persistent::save(&ctx, task);
     with_host(&ctx, |page| {
         if page.tasks.len() < MAX_TASKS {
@@ -1801,7 +1796,10 @@ mod tests {
         assert_eq!(logs[1], ("warn".to_string(), "warning message".to_string()));
         assert_eq!(
             logs[2],
-            ("error".to_string(), "error occurred: {\"code\":500}".to_string())
+            (
+                "error".to_string(),
+                "error occurred: {\"code\":500}".to_string()
+            )
         );
         assert_eq!(logs[3], ("info".to_string(), "info text".to_string()));
         assert_eq!(

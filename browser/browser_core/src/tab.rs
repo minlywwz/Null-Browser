@@ -72,7 +72,8 @@ impl TabManager {
         if self.tabs.is_empty() {
             let new_id = TabId(self.next_id);
             self.next_id += 1;
-            self.tabs.push(Tab::new(new_id, Location::Example(Example::Start)));
+            self.tabs
+                .push(Tab::new(new_id, Location::Example(Example::Start)));
             self.active = 0;
         } else if index < self.active {
             self.active -= 1;
@@ -313,17 +314,20 @@ mod tests {
         assert!(!tab.history.can_back());
         assert!(!tab.history.can_forward());
 
-        tab.history.commit(Visit::New, Location::Example(Example::Rendering), 42.0);
+        tab.history
+            .commit(Visit::New, Location::Example(Example::Rendering), 42.0);
         assert!(tab.history.can_back());
         assert!(!tab.history.can_forward());
         assert_eq!(tab.location(), &Location::Example(Example::Rendering));
 
-        tab.history.commit(Visit::Back, Location::Example(Example::Start), 0.0);
+        tab.history
+            .commit(Visit::Back, Location::Example(Example::Start), 0.0);
         assert!(!tab.history.can_back());
         assert!(tab.history.can_forward());
         assert_eq!(tab.location(), &Location::Example(Example::Start));
 
-        tab.history.commit(Visit::Forward, Location::Example(Example::Rendering), 42.0);
+        tab.history
+            .commit(Visit::Forward, Location::Example(Example::Rendering), 42.0);
         assert!(tab.history.can_back());
         assert!(!tab.history.can_forward());
         assert_eq!(tab.location(), &Location::Example(Example::Rendering));

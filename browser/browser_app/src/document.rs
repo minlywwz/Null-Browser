@@ -104,19 +104,27 @@ impl DocumentWorker {
                             }
                             let page = match job.action {
                                 Some(FormAction::Click(node)) => {
-                                    site.as_mut().unwrap().click(node, job.viewport, job.generation)
+                                    site.as_mut()
+                                        .unwrap()
+                                        .click(node, job.viewport, job.generation)
                                 }
-                                Some(FormAction::Input { node, value }) => {
-                                    site.as_mut().unwrap().form_input(node, value, job.viewport, job.generation)
-                                }
-                                Some(FormAction::Toggle(node)) => {
-                                    site.as_mut().unwrap().form_toggle(node, job.viewport, job.generation)
-                                }
-                                Some(FormAction::Radio(node)) => {
-                                    site.as_mut().unwrap().form_radio(node, job.viewport, job.generation)
-                                }
+                                Some(FormAction::Input { node, value }) => site
+                                    .as_mut()
+                                    .unwrap()
+                                    .form_input(node, value, job.viewport, job.generation),
+                                Some(FormAction::Toggle(node)) => site
+                                    .as_mut()
+                                    .unwrap()
+                                    .form_toggle(node, job.viewport, job.generation),
+                                Some(FormAction::Radio(node)) => site.as_mut().unwrap().form_radio(
+                                    node,
+                                    job.viewport,
+                                    job.generation,
+                                ),
                                 Some(FormAction::Submit(node)) => {
-                                    if let Some((action, query)) = site.as_ref().unwrap().submit_form(node) {
+                                    if let Some((action, query)) =
+                                        site.as_ref().unwrap().submit_form(node)
+                                    {
                                         let target_href = if action.is_empty() {
                                             query
                                         } else if query.is_empty() {
@@ -127,16 +135,17 @@ impl DocumentWorker {
                                             format!("{}{}", action, query)
                                         };
                                         let target_url = url.join(&target_href).ok();
-                                        let mut page = site.as_mut().unwrap().layout(job.viewport, job.generation)?;
+                                        let mut page = site
+                                            .as_mut()
+                                            .unwrap()
+                                            .layout(job.viewport, job.generation)?;
                                         page.resolved = target_url;
                                         Ok(page)
                                     } else {
                                         site.as_mut().unwrap().layout(job.viewport, job.generation)
                                     }
                                 }
-                                None => {
-                                    site.as_mut().unwrap().layout(job.viewport, job.generation)
-                                }
+                                None => site.as_mut().unwrap().layout(job.viewport, job.generation),
                             };
                             if page.is_err() {
                                 site = None;
@@ -157,9 +166,13 @@ impl DocumentWorker {
                             }
                             let proc = &local.as_ref().unwrap().1;
                             let page = match job.action {
-                                Some(FormAction::Click(node)) => {
-                                    proc.paint_page(Request::Click { node, viewport: job.viewport }, job.generation)
-                                }
+                                Some(FormAction::Click(node)) => proc.paint_page(
+                                    Request::Click {
+                                        node,
+                                        viewport: job.viewport,
+                                    },
+                                    job.generation,
+                                ),
                                 Some(FormAction::Input { node, value }) => {
                                     proc.form_input(node, value, job.viewport, job.generation)
                                 }
@@ -181,16 +194,32 @@ impl DocumentWorker {
                                             format!("{}{}", action, query)
                                         };
                                         let target_url = Url::parse(&target_href).ok();
-                                        let mut page = proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)?;
+                                        let mut page = proc.paint_page(
+                                            Request::Layout {
+                                                viewport: job.viewport,
+                                                assets: None,
+                                            },
+                                            job.generation,
+                                        )?;
                                         page.resolved = target_url;
                                         Ok(page)
                                     } else {
-                                        proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)
+                                        proc.paint_page(
+                                            Request::Layout {
+                                                viewport: job.viewport,
+                                                assets: None,
+                                            },
+                                            job.generation,
+                                        )
                                     }
                                 }
-                                None => {
-                                    proc.paint_page(Request::Layout { viewport: job.viewport, assets: None }, job.generation)
-                                }
+                                None => proc.paint_page(
+                                    Request::Layout {
+                                        viewport: job.viewport,
+                                        assets: None,
+                                    },
+                                    job.generation,
+                                ),
                             };
                             if page.is_err() {
                                 local = None;
@@ -230,34 +259,48 @@ impl DocumentWorker {
                                 document.select_radio(node as usize);
                             }
                             Some(FormAction::Submit(node)) => {
-                                if let Some(form_id) = document.form_for_node(node as usize) {
-                                    if let Some((action, _method, pairs)) = document.serialize_form(form_id) {
-                                        let query = if pairs.is_empty() {
-                                            String::new()
-                                        } else {
-                                            let qs = pairs
-                                                .iter()
-                                                .map(|(k, v)| format!("{}={}", web_engine::url_encode(k), web_engine::url_encode(v)))
-                                                .collect::<Vec<_>>()
-                                                .join("&");
-                                            format!("?{qs}")
-                                        };
-                                        let target_href = if action.is_empty() {
-                                            query
-                                        } else if query.is_empty() {
-                                            action
-                                        } else if action.contains('?') {
-                                            format!("{}&{}", action, &query[1..])
-                                        } else {
-                                            format!("{}{}", action, query)
-                                        };
-                                        resolved = Url::parse(&target_href).ok();
-                                    }
+                                if let Some(form_id) = document.form_for_node(node as usize)
+                                    && let Some((action, _method, pairs)) =
+                                        document.serialize_form(form_id)
+                                {
+                                    let query = if pairs.is_empty() {
+                                        String::new()
+                                    } else {
+                                        let qs = pairs
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                format!(
+                                                    "{}={}",
+                                                    web_engine::url_encode(k),
+                                                    web_engine::url_encode(v)
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("&");
+                                        format!("?{qs}")
+                                    };
+                                    let target_href = if action.is_empty() {
+                                        query
+                                    } else if query.is_empty() {
+                                        action
+                                    } else if action.contains('?') {
+                                        format!("{}&{}", action, &query[1..])
+                                    } else {
+                                        format!("{}{}", action, query)
+                                    };
+                                    resolved = Url::parse(&target_href).ok();
                                 }
                             }
                             _ => {}
                         }
-                        let mut page = build_page(document, factory, job.generation, job.viewport, images, input_state)?;
+                        let mut page = build_page(
+                            document,
+                            factory,
+                            job.generation,
+                            job.viewport,
+                            images,
+                            input_state,
+                        )?;
                         page.resolved = resolved;
                         Ok(page)
                     })();
@@ -541,12 +584,21 @@ mod tests {
         let (action, _method, pairs) = doc.serialize_form(form_id).unwrap();
         let qs = pairs
             .iter()
-            .map(|(k, v)| format!("{}={}", web_engine::url_encode(k), web_engine::url_encode(v)))
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    web_engine::url_encode(k),
+                    web_engine::url_encode(v)
+                )
+            })
             .collect::<Vec<_>>()
             .join("&");
         let query = format!("?{qs}");
         let target_href = format!("{}{}", action, query);
         let target_url = Url::parse(&target_href).unwrap();
-        assert_eq!(target_url.as_str(), "https://example.com/login?username=alice&remember=on");
+        assert_eq!(
+            target_url.as_str(),
+            "https://example.com/login?username=alice&remember=on"
+        );
     }
 }

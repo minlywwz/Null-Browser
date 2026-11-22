@@ -29,16 +29,22 @@ pub fn parse_control_action(href: &str) -> Option<ControlAction> {
         Some(ControlAction::Click(id))
     } else if let Some(id) = href.strip_prefix("ko4:input:").and_then(|v| v.parse().ok()) {
         Some(ControlAction::Input(id))
-    } else if let Some(id) = href.strip_prefix("ko4:submit:").and_then(|v| v.parse().ok()) {
+    } else if let Some(id) = href
+        .strip_prefix("ko4:submit:")
+        .and_then(|v| v.parse().ok())
+    {
         Some(ControlAction::Submit(id))
-    } else if let Some(id) = href.strip_prefix("ko4:toggle:").and_then(|v| v.parse().ok()) {
+    } else if let Some(id) = href
+        .strip_prefix("ko4:toggle:")
+        .and_then(|v| v.parse().ok())
+    {
         Some(ControlAction::Toggle(id))
     } else if let Some(id) = href.strip_prefix("ko4:radio:").and_then(|v| v.parse().ok()) {
         Some(ControlAction::Radio(id))
-    } else if let Some(id) = href.strip_prefix("ko4:media:toggle:").and_then(|v| v.parse().ok()) {
-        Some(ControlAction::MediaToggle(id))
     } else {
-        None
+        href.strip_prefix("ko4:media:toggle:")
+            .and_then(|v| v.parse().ok())
+            .map(ControlAction::MediaToggle)
     }
 }
 

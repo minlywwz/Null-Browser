@@ -122,7 +122,12 @@ impl Geometry {
         for (i, tab) in model.tabs.iter().enumerate() {
             let tab_rect = Rect::new(8.0 + i as f32 * (tab_w + 4.0), tab_bar_y + 3.0, tab_w, 28.0);
             buttons.push((Action::SelectTab(tab.id), tab_rect));
-            let close_rect = Rect::new(tab_rect.x + tab_rect.width - 22.0, tab_rect.y + 5.0, 18.0, 18.0);
+            let close_rect = Rect::new(
+                tab_rect.x + tab_rect.width - 22.0,
+                tab_rect.y + 5.0,
+                18.0,
+                18.0,
+            );
             buttons.push((Action::CloseTab(tab.id), close_rect));
         }
 
@@ -134,7 +139,10 @@ impl Geometry {
         buttons.push((Action::Forward, Rect::new(48.0, nav_y, 34.0, 38.0)));
         buttons.push((Action::Reload, Rect::new(84.0, nav_y, 34.0, 38.0)));
         buttons.push((Action::Address, address));
-        buttons.push((Action::Menu, Rect::new(model.width - 46.0, nav_y, 34.0, 38.0)));
+        buttons.push((
+            Action::Menu,
+            Rect::new(model.width - 46.0, nav_y, 34.0, 38.0),
+        ));
 
         let preview = preview(view);
         if model.demo {
@@ -312,7 +320,12 @@ pub fn build(factory: &TextFactory, model: &Model) -> Result<PreparedScene, Stri
 
         for (i, tab) in model.tabs.iter().enumerate() {
             let tab_rect = Rect::new(8.0 + i as f32 * (tab_w + 4.0), tab_bar_y + 3.0, tab_w, 28.0);
-            let close_rect = Rect::new(tab_rect.x + tab_rect.width - 22.0, tab_rect.y + 5.0, 18.0, 18.0);
+            let close_rect = Rect::new(
+                tab_rect.x + tab_rect.width - 22.0,
+                tab_rect.y + 5.0,
+                18.0,
+                18.0,
+            );
 
             if tab.active {
                 paint.fill(tab_rect, Color::rgb(0x222730), 6.0);
@@ -742,8 +755,10 @@ mod tests {
 
     #[test]
     fn geometry_layout_bottom_position() {
-        let mut settings = Settings::default();
-        settings.position = ToolbarPosition::Bottom;
+        let settings = Settings {
+            position: ToolbarPosition::Bottom,
+            ..Settings::default()
+        };
         let model = Model {
             width: 800.0,
             height: 600.0,
@@ -803,7 +818,12 @@ mod tests {
             scroll_max: 0.0,
         };
         let geom = Geometry::for_model(&model);
-        let tab_rect = geom.buttons.iter().find(|(a, _)| *a == Action::SelectTab(0)).unwrap().1;
+        let tab_rect = geom
+            .buttons
+            .iter()
+            .find(|(a, _)| *a == Action::SelectTab(0))
+            .unwrap()
+            .1;
         assert_eq!(tab_rect.width, 180.0);
 
         // 20 tabs -> should clamp down to 70.0 min
@@ -816,7 +836,12 @@ mod tests {
             .collect();
         let model_many = Model { tabs, ..model };
         let geom_many = Geometry::for_model(&model_many);
-        let tab_rect_many = geom_many.buttons.iter().find(|(a, _)| *a == Action::SelectTab(0)).unwrap().1;
+        let tab_rect_many = geom_many
+            .buttons
+            .iter()
+            .find(|(a, _)| *a == Action::SelectTab(0))
+            .unwrap()
+            .1;
         assert_eq!(tab_rect_many.width, 70.0);
     }
 

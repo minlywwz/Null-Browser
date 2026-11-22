@@ -192,10 +192,8 @@ unsafe extern "system" fn procedure(
                     .and_then(|app| app.as_ref().map(|a| a.editing))
                     .unwrap_or(false)
             });
-            if !editing {
-                if let Some(ch) = char::from_u32(wparam as u32) {
-                    send(Event::Char(ch));
-                }
+            if !editing && let Some(ch) = char::from_u32(wparam as u32) {
+                send(Event::Char(ch));
             }
             return 0;
         }
@@ -394,7 +392,12 @@ impl App {
             settings: self.settings,
             tabs,
             can_back: self.tabs.active_tab().history.target(Visit::Back).is_some(),
-            can_forward: self.tabs.active_tab().history.target(Visit::Forward).is_some(),
+            can_forward: self
+                .tabs
+                .active_tab()
+                .history
+                .target(Visit::Forward)
+                .is_some(),
             loading,
             menu: self.menu,
             editing: self.editing,
@@ -517,11 +520,9 @@ impl App {
             match completion.result {
                 Ok(page) => {
                     let was_submit = matches!(pending.action, Some(FormAction::Submit(_)));
-                    if was_submit {
-                        if let Some(target_url) = page.resolved {
-                            self.navigate_web(target_url);
-                            return;
-                        }
+                    if was_submit && let Some(target_url) = page.resolved {
+                        self.navigate_web(target_url);
+                        return;
                     }
                     let transition = self.geometry.is_some()
                         && !self.demo
@@ -546,7 +547,10 @@ impl App {
                     self.geometry = Some(page.geometry);
                     self.scroll = scroll.clamp(0.0, self.max_scroll());
                     let location = page.resolved.map(Location::Web).unwrap_or(pending.location);
-                    self.tabs.active_tab_mut().history.commit(pending.visit, location, self.scroll);
+                    self.tabs
+                        .active_tab_mut()
+                        .history
+                        .commit(pending.visit, location, self.scroll);
                     self.committed = completion.generation;
                     let page_title = self
                         .geometry
@@ -965,12 +969,18 @@ impl App {
                 .buttons
                 .into_iter()
                 .filter_map(|(action, _)| {
-                    (action != Action::Back || self.tabs.active_tab().history.target(Visit::Back).is_some())
-                        .then_some(action)
-                        .filter(|action| {
-                            *action != Action::Forward
-                                || self.tabs.active_tab().history.target(Visit::Forward).is_some()
-                        })
+                    (action != Action::Back
+                        || self.tabs.active_tab().history.target(Visit::Back).is_some())
+                    .then_some(action)
+                    .filter(|action| {
+                        *action != Action::Forward
+                            || self
+                                .tabs
+                                .active_tab()
+                                .history
+                                .target(Visit::Forward)
+                                .is_some()
+                    })
                 })
                 .collect()
         };
@@ -1034,9 +1044,7 @@ impl App {
             (VK_UP, _, false) => self.set_scroll(self.scroll - 42.0),
             (VK_DOWN, _, false) => self.set_scroll(self.scroll + 42.0),
             (VK_PRIOR, _, false) => self.set_scroll(self.scroll - self.viewport().height * 0.85),
-            (VK_NEXT, _, false) => {
-                self.set_scroll(self.scroll + self.viewport().height * 0.85)
-            }
+            (VK_NEXT, _, false) => self.set_scroll(self.scroll + self.viewport().height * 0.85),
             (VK_SPACE, _, false) if self.focused_input.is_none() => {
                 self.set_scroll(self.scroll + self.viewport().height * 0.85)
             }
@@ -1153,7 +1161,8 @@ impl App {
                     self.end_address();
                     match web_engine::parse_control_action(&href) {
                         Some(ControlAction::Input(id)) => {
-                            let current_value = self.input_values.get(&id).cloned().unwrap_or_default();
+                            let current_value =
+                                self.input_values.get(&id).cloned().unwrap_or_default();
                             self.focused_input = Some((id, current_value.clone()));
                             self.send_form_action(FormAction::Input {
                                 node: id,
@@ -1221,10 +1230,7 @@ impl App {
                         text.pop();
                         let value = text.clone();
                         self.input_values.insert(node, value.clone());
-                        self.send_form_action(FormAction::Input {
-                            node,
-                            value,
-                        });
+                        self.send_form_action(FormAction::Input { node, value });
                     } else if ch == '\x1b' {
                         self.focused_input = None;
                         self.request_layout();
@@ -1232,10 +1238,7 @@ impl App {
                         text.push(ch);
                         let value = text.clone();
                         self.input_values.insert(node, value.clone());
-                        self.send_form_action(FormAction::Input {
-                            node,
-                            value,
-                        });
+                        self.send_form_action(FormAction::Input { node, value });
                     }
                 }
             }
