@@ -5,9 +5,9 @@ use display_list::{Color, FontFamily, TextAlign, TextStyle};
 use crate::{
     Viewport,
     css_parser::{
-        AlignItems, AttrMatch, Combinator, Compound, Declaration, Display, GridColumns,
-        JustifyContent, Length, MAX_STYLESHEET_BYTES, Position, Rule, Selector, TextTransform,
-        WhiteSpace, parse_inline, parse_selector, parse_stylesheet_with_fonts,
+        AlignItems, AttrMatch, BoxShadow, Combinator, Compound, Declaration, Display, GridColumns,
+        JustifyContent, Length, MAX_STYLESHEET_BYTES, ObjectFit, Position, Rule, Selector,
+        TextTransform, WhiteSpace, parse_inline, parse_selector, parse_stylesheet_with_fonts,
     },
     dom::{Document, Kind, Node, NodeId},
 };
@@ -53,6 +53,9 @@ pub(crate) struct Style {
     pub(crate) text_transform: TextTransform,
     pub(crate) line_height: Option<Length>,
     pub(crate) flex_wrap: bool,
+    pub(crate) aspect_ratio: Option<f32>,
+    pub(crate) object_fit: ObjectFit,
+    pub(crate) box_shadow: Option<BoxShadow>,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +110,9 @@ impl Default for Style {
             text_transform: TextTransform::None,
             line_height: None,
             flex_wrap: false,
+            aspect_ratio: None,
+            object_fit: ObjectFit::Fill,
+            box_shadow: None,
         }
     }
 }
@@ -451,6 +457,11 @@ impl Style {
                 self.line_height = (value != Length::Auto).then_some(value)
             }
             Declaration::FlexWrap(value) => self.flex_wrap = value,
+            Declaration::AspectRatio(value) => {
+                self.aspect_ratio = if value > 0.0 { Some(value) } else { None };
+            }
+            Declaration::ObjectFit(value) => self.object_fit = value,
+            Declaration::BoxShadow(value) => self.box_shadow = Some(value),
         }
     }
 }
@@ -704,5 +715,30 @@ mod tests {
         assert_eq!(styles[svg].display, Display::InlineBlock);
         assert_eq!(styles[svg].width, Length::Px(24.0));
         assert_eq!(styles[svg].height, Length::Px(24.0));
+    }
+
+    #[test]
+    fn style_computes_aspect_ratio_object_fit_and_box_shadow() {
+        let html = r#"<div id="target" style="aspect-ratio: 16/9; object-fit: contain; box-shadow: 2px 4px 6px black"></div>"#;
+        let doc = parse_html(html).unwrap();
+        let target = doc.element_by_id("target").unwrap();
+        let styles = compute_styles(
+            &doc,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(styles[target].aspect_ratio, Some(16.0 / 9.0));
+        assert_eq!(styles[target].object_fit, ObjectFit::Contain);
+        assert!(styles[target].box_shadow.is_some());
+        let shadow = styles[target].box_shadow.unwrap();
+        assert_eq!(shadow.offset_x, 2.0);
+        assert_eq!(shadow.offset_y, 4.0);
+        assert_eq!(shadow.blur, 6.0);
+        assert_eq!(shadow.color, Color::rgb(0x000000));
     }
 }

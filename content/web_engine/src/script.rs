@@ -24,11 +24,21 @@ thread_local! {
 pub type FetchHandler =
     Arc<dyn Fn(&str, &str, &str) -> Result<(u16, String, String), String> + Send + Sync>;
 
+pub(crate) struct TimerEntry {
+    #[allow(dead_code)]
+    pub id: u32,
+    pub callback: Persistent<Function<'static>>,
+    pub fire_at: Instant,
+    pub interval: Option<Duration>,
+}
+
 struct Page {
     document: Document,
     sources: HashMap<String, String>,
     clicks: Vec<(NodeId, Persistent<Function<'static>>)>,
     tasks: Vec<Persistent<Function<'static>>>,
+    timers: HashMap<u32, TimerEntry>,
+    next_timer_id: u32,
     executed: HashSet<NodeId>,
     errors: Vec<String>,
     console_logs: Vec<(String, String)>,
@@ -47,6 +57,9 @@ impl Drop for ScriptSession {
             }
             for function in page.tasks.drain(..) {
                 drop(function.restore(&ctx).ok());
+            }
+            for (_, timer) in page.timers.drain() {
+                drop(timer.callback.restore(&ctx).ok());
             }
         });
     }
@@ -71,6 +84,8 @@ impl ScriptSession {
             sources: HashMap::new(),
             clicks: Vec::new(),
             tasks: Vec::new(),
+            timers: HashMap::new(),
+            next_timer_id: 1,
             executed: HashSet::new(),
             errors: Vec::new(),
             console_logs: Vec::new(),
@@ -85,6 +100,64 @@ impl ScriptSession {
         };
         session.install_host()?;
         Ok(session)
+    }
+
+    pub fn advance_timers(&mut self, elapsed: Duration) -> Result<(), String> {
+        let viewport = Viewport {
+            width: 800.0,
+            height: 600.0,
+        };
+        self.with_page(viewport, |ctx| {
+            if !elapsed.is_zero() {
+                let mut page = self.page.borrow_mut();
+                for timer in page.timers.values_mut() {
+                    timer.fire_at = timer
+                        .fire_at
+                        .checked_sub(elapsed)
+                        .unwrap_or_else(Instant::now);
+                }
+            }
+            drain_ready_timers(&ctx, &self.page, Instant::now());
+            drain_tasks(&ctx, &self.page);
+            Ok(())
+        })
+    }
+
+    pub fn run_due_timers(&mut self) -> Result<(), String> {
+        self.advance_timers(Duration::ZERO)
+    }
+
+    pub fn trigger_timer(&mut self, id: u32) -> Result<bool, String> {
+        let viewport = Viewport {
+            width: 800.0,
+            height: 600.0,
+        };
+        self.with_page(viewport, |ctx| {
+            let callback = {
+                let mut page = self.page.borrow_mut();
+                let Some(timer) = page.timers.get_mut(&id) else {
+                    return Ok(false);
+                };
+                if let Some(period) = timer.interval {
+                    timer.fire_at = Instant::now() + period;
+                    timer.callback.clone()
+                } else {
+                    let timer = page.timers.remove(&id).unwrap();
+                    timer.callback
+                }
+            };
+            if let Ok(func) = callback.restore(&ctx) {
+                if let Err(error) = func.call::<_, rquickjs::Value>(()) {
+                    self.page.borrow_mut().errors.push(explain(&ctx, error));
+                }
+            }
+            drain_tasks(&ctx, &self.page);
+            Ok(true)
+        })
+    }
+
+    pub fn pending_timer_count(&self) -> usize {
+        self.page.borrow().timers.len()
     }
 
     pub fn console_logs(&self) -> Vec<(String, String)> {
@@ -422,15 +495,14 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
     .map_err(|error| error.to_string())?;
     let attribute = Function::new(
         ctx.clone(),
-        |ctx: Ctx<'_>, id: u32, name: String| -> rquickjs::Result<String> {
+        |ctx: Ctx<'_>, id: u32, name: String| -> rquickjs::Result<Option<String>> {
             with_host(&ctx, |page| {
                 Ok(page
                     .document
                     .nodes
                     .get(id as usize)
                     .and_then(|node| node.attr(&name.to_ascii_lowercase()))
-                    .unwrap_or("")
-                    .to_owned())
+                    .map(|v| v.to_owned()))
             })
         },
     )
@@ -625,6 +697,10 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
     })
     .map_err(|error| error.to_string())?;
     let fetch = Function::new(ctx.clone(), fetch_host).map_err(|error| error.to_string())?;
+    let set_timer =
+        Function::new(ctx.clone(), set_timer_host).map_err(|error| error.to_string())?;
+    let clear_timer =
+        Function::new(ctx.clone(), clear_timer_host).map_err(|error| error.to_string())?;
     host.set("byId", by_id).map_err(|error| error.to_string())?;
     host.set("query", query)
         .map_err(|error| error.to_string())?;
@@ -678,6 +754,10 @@ fn bind<'js>(ctx: &Ctx<'js>, host: &rquickjs::Object<'js>) -> Result<(), String>
     host.set("storageLength", storage_length)
         .map_err(|error| error.to_string())?;
     host.set("fetch", fetch)
+        .map_err(|error| error.to_string())?;
+    host.set("setTimer", set_timer)
+        .map_err(|error| error.to_string())?;
+    host.set("clearTimer", clear_timer)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -745,7 +825,82 @@ fn fetch_host<'js>(
     Ok(())
 }
 
+fn set_timer_host<'js>(
+    ctx: Ctx<'js>,
+    callback: Function<'js>,
+    delay_ms: f64,
+    interval_ms: f64,
+) -> rquickjs::Result<u32> {
+    let saved = Persistent::save(&ctx, callback);
+    with_host(&ctx, |page| {
+        let id = page.next_timer_id;
+        page.next_timer_id = page.next_timer_id.wrapping_add(1).max(1);
+        let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
+        let interval = if interval_ms > 0.0 {
+            Some(Duration::from_millis(interval_ms.max(1.0) as u64))
+        } else {
+            None
+        };
+        if page.timers.len() < 512 {
+            page.timers.insert(
+                id,
+                TimerEntry {
+                    id,
+                    callback: saved,
+                    fire_at: Instant::now() + delay,
+                    interval,
+                },
+            );
+        }
+        Ok(id)
+    })
+}
+
+fn clear_timer_host<'js>(ctx: Ctx<'js>, id: u32) -> rquickjs::Result<()> {
+    with_host(&ctx, |page| {
+        page.timers.remove(&id);
+        Ok(())
+    })
+}
+
+fn drain_ready_timers(ctx: &Ctx<'_>, page_cell: &RefCell<Page>, now: Instant) {
+    for _ in 0..MAX_TASKS {
+        let next = {
+            let page = page_cell.borrow();
+            page.timers
+                .iter()
+                .filter(|(_, timer)| timer.fire_at <= now)
+                .map(|(&id, _)| id)
+                .next()
+        };
+        let Some(id) = next else {
+            break;
+        };
+        let callback = {
+            let mut page = page_cell.borrow_mut();
+            let Some(timer) = page.timers.get_mut(&id) else {
+                continue;
+            };
+            if let Some(period) = timer.interval {
+                timer.fire_at = now + period;
+                timer.callback.clone()
+            } else {
+                let timer = page.timers.remove(&id).unwrap();
+                timer.callback
+            }
+        };
+        let Ok(func) = callback.restore(ctx) else {
+            continue;
+        };
+        if let Err(error) = func.call::<_, rquickjs::Value>(()) {
+            page_cell.borrow_mut().errors.push(explain(ctx, error));
+        }
+        while ctx.execute_pending_job() {}
+    }
+}
+
 fn drain_tasks(ctx: &Ctx<'_>, page_cell: &RefCell<Page>) {
+    drain_ready_timers(ctx, page_cell, Instant::now());
     for _ in 0..MAX_TASKS {
         while ctx.execute_pending_job() {}
         let task = {
@@ -762,6 +917,7 @@ fn drain_tasks(ctx: &Ctx<'_>, page_cell: &RefCell<Page>) {
             page_cell.borrow_mut().errors.push(explain(ctx, error));
         }
         while ctx.execute_pending_job() {}
+        drain_ready_timers(ctx, page_cell, Instant::now());
     }
     while ctx.execute_pending_job() {}
 }
@@ -863,9 +1019,15 @@ const BOOTSTRAP: &str = r#"
     set innerText(value) { this.textContent = value; },
     get innerHTML() { return this.textContent; },
     set innerHTML(value) { __host.setHtml(this.__id, String(value)); },
-    get id() { return __host.attribute(this.__id, "id"); },
+    get id() {
+      const val = __host.attribute(this.__id, "id");
+      return (val === undefined || val === null) ? "" : val;
+    },
     set id(value) { __host.setAttribute(this.__id, "id", String(value)); },
-    get className() { return __host.attribute(this.__id, "class"); },
+    get className() {
+      const val = __host.attribute(this.__id, "class");
+      return (val === undefined || val === null) ? "" : val;
+    },
     set className(value) { __host.setAttribute(this.__id, "class", String(value)); },
     get tagName() { return __host.tag(this.__id); },
     get clientWidth() { return innerWidth; },
@@ -873,10 +1035,46 @@ const BOOTSTRAP: &str = r#"
     get classList() {
       const id = this.__id;
       return {
-        add() { for (const name of arguments) __host.classList(id, "add", String(name)); },
-        remove() { for (const name of arguments) __host.classList(id, "remove", String(name)); },
-        toggle(name) { return __host.classList(id, "toggle", String(name)); },
-        contains(name) { return __host.classList(id, "contains", String(name)); }
+        add(...names) {
+          for (const name of names) {
+            __host.classList(id, "add", String(name));
+          }
+        },
+        remove(...names) {
+          for (const name of names) {
+            __host.classList(id, "remove", String(name));
+          }
+        },
+        toggle(name, force) {
+          if (force !== undefined) {
+            if (force) {
+              this.add(name);
+              return true;
+            } else {
+              this.remove(name);
+              return false;
+            }
+          }
+          return Boolean(__host.classList(id, "toggle", String(name)));
+        },
+        contains(name) {
+          return Boolean(__host.classList(id, "contains", String(name)));
+        },
+        get value() {
+          const val = __host.attribute(id, "class");
+          return (val === undefined || val === null) ? "" : val;
+        },
+        toString() { return this.value; },
+        get length() {
+          const val = this.value.trim();
+          return val ? val.split(/\s+/).length : 0;
+        },
+        item(index) {
+          const val = this.value.trim();
+          if (!val) return null;
+          const parts = val.split(/\s+/);
+          return parts[index] ?? null;
+        }
       };
     },
     get style() {
@@ -888,7 +1086,14 @@ const BOOTSTRAP: &str = r#"
     },
     get children() { return __host.children(this.__id).map(wrap); },
     setAttribute(name, value) { __host.setAttribute(this.__id, String(name), String(value)); },
-    getAttribute(name) { return __host.attribute(this.__id, String(name)); },
+    getAttribute(name) {
+      const val = __host.attribute(this.__id, String(name));
+      return (val === undefined || val === null) ? null : String(val);
+    },
+    hasAttribute(name) {
+      const val = __host.attribute(this.__id, String(name));
+      return val !== undefined && val !== null;
+    },
     removeAttribute(name) { __host.removeAttribute(this.__id, String(name)); },
     appendChild(child) { __host.append(this.__id, child.__id); return child; },
     remove() { __host.remove(this.__id); },
@@ -912,6 +1117,7 @@ const BOOTSTRAP: &str = r#"
     set title(value) { __host.setTitle(String(value)); },
     addEventListener(type, fn) { this.documentElement.addEventListener(type, fn); }
   };
+  globalThis.window = globalThis;
   function __formatArg(arg) {
     if (typeof arg === "string") return arg;
     if (typeof arg === "number" || typeof arg === "boolean" || typeof arg === "undefined" || arg === null) {
@@ -1054,9 +1260,40 @@ const BOOTSTRAP: &str = r#"
       });
     });
   };
-  globalThis.setTimeout = function (fn) { if (typeof fn === "function") __host.later(fn); return 0; };
-  globalThis.clearTimeout = function () {};
+  globalThis.setTimeout = function (handler, delay, ...args) {
+    let fn = handler;
+    if (typeof fn === "string") {
+      const code = fn;
+      fn = () => (0, eval)(code);
+    }
+    if (typeof fn !== "function") return 0;
+    const ms = Math.max(0, Number(delay) || 0);
+    const cb = args.length ? () => fn(...args) : fn;
+    return __host.setTimer(cb, ms, 0);
+  };
+  globalThis.clearTimeout = function (id) {
+    if (id !== undefined && id !== null) {
+      __host.clearTimer(Number(id) >>> 0);
+    }
+  };
+  globalThis.setInterval = function (handler, interval, ...args) {
+    let fn = handler;
+    if (typeof fn === "string") {
+      const code = fn;
+      fn = () => (0, eval)(code);
+    }
+    if (typeof fn !== "function") return 0;
+    const ms = Math.max(1, Number(interval) || 0);
+    const cb = args.length ? () => fn(...args) : fn;
+    return __host.setTimer(cb, ms, ms);
+  };
+  globalThis.clearInterval = function (id) {
+    if (id !== undefined && id !== null) {
+      __host.clearTimer(Number(id) >>> 0);
+    }
+  };
   globalThis.requestAnimationFrame = function (fn) { if (typeof fn === "function") __host.later(fn); return 0; };
+  globalThis.cancelAnimationFrame = function (id) { globalThis.clearTimeout(id); };
   globalThis.addEventListener = function (type, fn) { document.addEventListener(type, fn); };
   const modules = new Map();
   const factories = new Map();
@@ -2038,5 +2275,289 @@ mod tests {
         assert!(source.contains("{ label: \"ok\", count: 1 }"), "{source}");
         assert!(!source.contains(": string"), "{source}");
         assert!(source.contains("function ping(value)"), "{source}");
+    }
+
+    #[test]
+    fn test_document_query_selector_and_all() {
+        let mut session = ScriptSession::open(
+            r##"
+            <div id="container">
+                <p class="intro highlight">First</p>
+                <p class="body-text">Second</p>
+                <span class="highlight">Third</span>
+            </div>
+            <div id="output"></div>
+            <script>
+                const p = document.querySelector("#container .intro");
+                const nonExistent = document.querySelector(".does-not-exist");
+                const allHighlights = document.querySelectorAll(".highlight");
+                const allParagraphs = document.querySelectorAll("p");
+
+                const res = [
+                    p ? p.textContent : "null",
+                    nonExistent === null ? "null" : "found",
+                    allHighlights.length,
+                    allHighlights.map(el => el.textContent).join(","),
+                    allParagraphs.length
+                ];
+                document.getElementById("output").textContent = res.join("|");
+            </script>
+            "##,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let out = session.document().element_by_id("output").unwrap();
+        assert_eq!(
+            session.document().text_of(out),
+            "First|null|2|First,Third|2"
+        );
+    }
+
+    #[test]
+    fn test_element_scoped_query_selector() {
+        let mut session = ScriptSession::open(
+            r##"
+            <div id="scope1">
+                <span class="item">Item 1</span>
+            </div>
+            <div id="scope2">
+                <span class="item">Item 2</span>
+            </div>
+            <div id="output"></div>
+            <script>
+                const scope2 = document.querySelector("#scope2");
+                const item = scope2.querySelector(".item");
+                const items = scope2.querySelectorAll(".item");
+                document.getElementById("output").textContent = item.textContent + "|" + items.length;
+            </script>
+            "##,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let out = session.document().element_by_id("output").unwrap();
+        assert_eq!(session.document().text_of(out), "Item 2|1");
+    }
+
+    #[test]
+    fn test_element_class_list_operations() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="target" class="initial beta"></div>
+            <div id="output"></div>
+            <script>
+                const el = document.getElementById("target");
+                const results = [];
+
+                results.push(el.classList.contains("initial")); // true
+                results.push(el.classList.contains("missing")); // false
+
+                el.classList.add("added");
+                results.push(el.classList.contains("added")); // true
+                results.push(el.className); // "initial beta added"
+
+                el.classList.remove("beta");
+                results.push(el.classList.contains("beta")); // false
+
+                const toggled1 = el.classList.toggle("toggle-class"); // true (added)
+                results.push(toggled1);
+                results.push(el.classList.contains("toggle-class")); // true
+
+                const toggled2 = el.classList.toggle("toggle-class"); // false (removed)
+                results.push(toggled2);
+                results.push(el.classList.contains("toggle-class")); // false
+
+                document.getElementById("output").textContent = results.join(",");
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let out = session.document().element_by_id("output").unwrap();
+        assert_eq!(
+            session.document().text_of(out),
+            "true,false,true,initial beta added,false,true,true,false,false"
+        );
+
+        // Verify the DOM node's actual class attribute was updated
+        let target_node = session.document().element_by_id("target").unwrap();
+        assert_eq!(
+            session.document().nodes[target_node].attr("class"),
+            Some("initial added")
+        );
+    }
+
+    #[test]
+    fn test_element_get_and_set_attribute() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="target" data-initial="hello"></div>
+            <div id="output"></div>
+            <script>
+                const el = document.getElementById("target");
+                const r1 = el.getAttribute("data-initial");
+                const r2 = el.getAttribute("data-nonexistent");
+
+                el.setAttribute("data-new", "world");
+                const r3 = el.getAttribute("data-new");
+
+                el.setAttribute("data-initial", "updated");
+                const r4 = el.getAttribute("data-initial");
+
+                document.getElementById("output").textContent = [
+                    r1,
+                    r2 === null ? "null" : r2,
+                    r3,
+                    r4
+                ].join(",");
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+        let out = session.document().element_by_id("output").unwrap();
+        assert_eq!(session.document().text_of(out), "hello,null,world,updated");
+    }
+
+    #[test]
+    fn test_set_timeout_and_clear_timeout() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="out1">initial</div>
+            <div id="out2">initial</div>
+            <script>
+                // Zero-delay timeout should run in drain_tasks
+                setTimeout(() => {
+                    document.getElementById("out1").textContent = "fired1";
+                }, 0);
+
+                // Cancelled timeout should never run
+                const id = setTimeout(() => {
+                    document.getElementById("out2").textContent = "should-not-fire";
+                }, 0);
+                clearTimeout(id);
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+
+        let out1 = session.document().element_by_id("out1").unwrap();
+        assert_eq!(session.document().text_of(out1), "fired1");
+
+        let out2 = session.document().element_by_id("out2").unwrap();
+        assert_eq!(session.document().text_of(out2), "initial");
+    }
+
+    #[test]
+    fn test_set_timeout_with_delay_and_advance_timers() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="out">initial</div>
+            <script>
+                setTimeout(() => {
+                    document.getElementById("out").textContent = "delayed-fired";
+                }, 100);
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+
+        // Should not have fired yet
+        let out = session.document().element_by_id("out").unwrap();
+        assert_eq!(session.document().text_of(out), "initial");
+
+        // Advance timers by 150ms
+        session.advance_timers(Duration::from_millis(150)).unwrap();
+        assert_eq!(session.document().text_of(out), "delayed-fired");
+    }
+
+    #[test]
+    fn test_set_interval_and_clear_interval() {
+        let mut session = ScriptSession::open(
+            r#"
+            <div id="out">0</div>
+            <script>
+                let count = 0;
+                const intervalId = setInterval(() => {
+                    count++;
+                    document.getElementById("out").textContent = String(count);
+                    if (count >= 3) {
+                        clearInterval(intervalId);
+                    }
+                }, 50);
+            </script>
+            "#,
+        )
+        .unwrap();
+
+        session
+            .run(Viewport {
+                width: 640.0,
+                height: 480.0,
+            })
+            .unwrap();
+        assert!(session.failure().is_none(), "{:?}", session.failure());
+
+        let out = session.document().element_by_id("out").unwrap();
+        assert_eq!(session.document().text_of(out), "0");
+
+        // Step 1: count becomes 1
+        session.advance_timers(Duration::from_millis(60)).unwrap();
+        assert_eq!(session.document().text_of(out), "1");
+
+        // Step 2: count becomes 2
+        session.advance_timers(Duration::from_millis(60)).unwrap();
+        assert_eq!(session.document().text_of(out), "2");
+
+        // Step 3: count becomes 3 and clears interval
+        session.advance_timers(Duration::from_millis(60)).unwrap();
+        assert_eq!(session.document().text_of(out), "3");
+
+        // Step 4: count stays 3 because it was cleared
+        session.advance_timers(Duration::from_millis(100)).unwrap();
+        assert_eq!(session.document().text_of(out), "3");
     }
 }

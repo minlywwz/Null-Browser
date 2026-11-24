@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     io::{self, Read},
     net::IpAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -20,6 +21,8 @@ pub const MAX_STYLESHEET_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FONT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_CACHE_ENTRIES: usize = 512;
+pub const MAX_CACHE_AGE: Duration = Duration::from_secs(5 * 60);
 const MAX_REDIRECTS: usize = 6;
 
 pub fn address(input: &str) -> Result<Url, String> {
@@ -87,6 +90,7 @@ impl ResourceKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resource {
     pub url: Url,
     pub content_type: String,
@@ -116,6 +120,7 @@ impl Resource {
 pub struct NetworkStack {
     client: Client,
     public_assets: Client,
+    cache: Arc<Mutex<HashMap<Url, (Resource, Instant)>>>,
 }
 
 impl NetworkStack {
@@ -137,7 +142,87 @@ impl NetworkStack {
                     .no_proxy()
                     .dns_resolver(Arc::new(PublicDns)),
             )?,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
+    }
+
+    pub fn cached_entries(&self) -> usize {
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
+    }
+
+    pub fn is_cached(&self, url: &Url) -> bool {
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if let Ok(cache) = self.cache.lock() {
+            if let Some((_, time)) = cache.get(&key) {
+                return time.elapsed() < MAX_CACHE_AGE;
+            }
+        }
+        false
+    }
+
+    pub fn get_cached(&self, url: &Url) -> Option<Resource> {
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if let Ok(mut cache) = self.cache.lock() {
+            if let Some((resource, time)) = cache.get(&key) {
+                if time.elapsed() < MAX_CACHE_AGE {
+                    return Some(resource.clone());
+                } else {
+                    cache.remove(&key);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn cache_put(&self, url: &Url, resource: Resource) {
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if let Ok(mut cache) = self.cache.lock() {
+            Self::insert_into_cache(&mut cache, key, resource.clone());
+            let mut res_key = resource.url.clone();
+            res_key.set_fragment(None);
+            if res_key != *url {
+                Self::insert_into_cache(&mut cache, res_key, resource);
+            }
+        }
+    }
+
+    fn insert_into_cache(
+        cache: &mut HashMap<Url, (Resource, Instant)>,
+        key: Url,
+        resource: Resource,
+    ) {
+        if cache.len() >= MAX_CACHE_ENTRIES && !cache.contains_key(&key) {
+            let now = Instant::now();
+            cache.retain(|_, (_, time)| now.duration_since(*time) < MAX_CACHE_AGE);
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                if let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, (_, time))| *time)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest_key);
+                }
+            }
+        }
+        cache.insert(key, (resource, Instant::now()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_put_with_time(&self, url: &Url, resource: Resource, time: Instant) {
+        let mut key = url.clone();
+        key.set_fragment(None);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, (resource, time));
+        }
     }
 
     pub fn document(&self, url: &Url) -> Result<Resource, String> {
@@ -181,7 +266,7 @@ impl NetworkStack {
         self.fetch(&url, kind, Some(document), deadline, kind.accept(), None)
     }
 
-    fn fetch(
+    pub fn fetch(
         &self,
         url: &Url,
         kind: ResourceKind,
@@ -192,6 +277,7 @@ impl NetworkStack {
     ) -> Result<Resource, String> {
         let mut url = url.clone();
         url.set_fragment(None);
+        let initial_url = url.clone();
         let public_assets = owner.is_some_and(|document| !local_host(document));
         let client = if public_assets {
             &self.public_assets
@@ -207,6 +293,27 @@ impl NetworkStack {
             {
                 return Err("The document's resource is outside its allowed origins.".into());
             }
+
+            let should_cache = matches!(
+                kind,
+                ResourceKind::Stylesheet
+                    | ResourceKind::Image
+                    | ResourceKind::Script
+                    | ResourceKind::Font
+            );
+
+            if should_cache {
+                if let Ok(mut cache) = self.cache.lock() {
+                    if let Some((cached_resource, cached_time)) = cache.get(&url) {
+                        if cached_time.elapsed() < MAX_CACHE_AGE {
+                            return Ok(cached_resource.clone());
+                        } else {
+                            cache.remove(&url);
+                        }
+                    }
+                }
+            }
+
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err("The site took too long to respond.".into());
@@ -239,7 +346,14 @@ impl NetworkStack {
             if !status.is_success() {
                 return Err(format!("The server responded with {status}."));
             }
-            return read_response(response, url, kind.limit());
+            let resource = read_response(response, url.clone(), kind.limit())?;
+            if should_cache {
+                self.cache_put(&initial_url, resource.clone());
+                if url != initial_url {
+                    self.cache_put(&url, resource.clone());
+                }
+            }
+            return Ok(resource);
         }
         Err("The site redirected too many times.".into())
     }
@@ -381,5 +495,128 @@ mod tests {
             assert!(public_ip(input.parse().unwrap()));
         }
         assert!(local_host(&address("http://localhost:8787").unwrap()));
+    }
+
+    #[test]
+    fn test_in_memory_asset_caching_basic_ops() {
+        let stack = NetworkStack::new().unwrap();
+        let url = Url::parse("https://example.com/style.css").unwrap();
+        assert!(!stack.is_cached(&url));
+        assert_eq!(stack.cached_entries(), 0);
+
+        let res = Resource {
+            url: url.clone(),
+            content_type: "text/css".into(),
+            bytes: b"body { color: red; }".to_vec(),
+        };
+        stack.cache_put(&url, res.clone());
+        assert!(stack.is_cached(&url));
+        assert_eq!(stack.cached_entries(), 1);
+
+        let cached = stack.get_cached(&url).expect("cached resource");
+        assert_eq!(cached.url, url);
+        assert_eq!(cached.bytes, b"body { color: red; }");
+        assert_eq!(cached.content_type, "text/css");
+
+        stack.clear_cache();
+        assert!(!stack.is_cached(&url));
+        assert_eq!(stack.cached_entries(), 0);
+    }
+
+    #[test]
+    fn test_stale_cache_entry_eviction() {
+        let stack = NetworkStack::new().unwrap();
+        let url = Url::parse("https://example.com/script.js").unwrap();
+        let res = Resource {
+            url: url.clone(),
+            content_type: "application/javascript".into(),
+            bytes: b"console.log('hi');".to_vec(),
+        };
+
+        // Put with timestamp in the past exceeding MAX_CACHE_AGE
+        let past = Instant::now() - MAX_CACHE_AGE - Duration::from_secs(10);
+        stack.cache_put_with_time(&url, res, past);
+
+        assert!(!stack.is_cached(&url));
+        assert!(stack.get_cached(&url).is_none());
+        // Getting stale entry removes it from cache
+        assert_eq!(stack.cached_entries(), 0);
+    }
+
+    #[test]
+    fn test_max_cache_entries_limit() {
+        let stack = NetworkStack::new().unwrap();
+        for i in 0..600 {
+            let u = Url::parse(&format!("https://example.com/asset{i}.png")).unwrap();
+            let res = Resource {
+                url: u.clone(),
+                content_type: "image/png".into(),
+                bytes: vec![i as u8],
+            };
+            stack.cache_put(&u, res);
+        }
+        assert!(
+            stack.cached_entries() <= MAX_CACHE_ENTRIES,
+            "Cache size {} exceeded MAX_CACHE_ENTRIES {}",
+            stack.cached_entries(),
+            MAX_CACHE_ENTRIES
+        );
+    }
+
+    #[test]
+    fn test_thread_safe_concurrent_caching() {
+        use std::thread;
+
+        let stack = NetworkStack::new().unwrap();
+        let mut handles = Vec::new();
+
+        for worker in 0..8 {
+            let stack_clone = stack.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..50 {
+                    let u = Url::parse(&format!("https://example.com/worker_{worker}_item_{i}.woff2"))
+                        .unwrap();
+                    let res = Resource {
+                        url: u.clone(),
+                        content_type: "font/woff2".into(),
+                        bytes: vec![worker, i as u8],
+                    };
+                    stack_clone.cache_put(&u, res.clone());
+                    assert!(stack_clone.is_cached(&u));
+                    let got = stack_clone.get_cached(&u);
+                    assert!(got.is_some());
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(stack.cached_entries() > 0);
+    }
+
+    #[test]
+    fn test_cached_asset_returned_without_network() {
+        let stack = NetworkStack::new().unwrap();
+        let url = Url::parse("https://example.com/test.css").unwrap();
+        let res = Resource {
+            url: url.clone(),
+            content_type: "text/css".into(),
+            bytes: b"/* test */".to_vec(),
+        };
+        stack.cache_put(&url, res.clone());
+
+        // Call fetch directly with ResourceKind::Stylesheet - should return cached copy even without server
+        let fetched = stack.fetch(
+            &url,
+            ResourceKind::Stylesheet,
+            None,
+            Instant::now() + Duration::from_secs(1),
+            ResourceKind::Stylesheet.accept(),
+            None,
+        ).unwrap();
+
+        assert_eq!(fetched.bytes, b"/* test */");
     }
 }

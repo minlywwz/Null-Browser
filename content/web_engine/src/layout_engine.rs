@@ -6,7 +6,9 @@ use display_list::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    css_parser::{AlignItems, Display, GridTrack, JustifyContent, Length, Position, TextTransform},
+    css_parser::{
+        AlignItems, Display, GridTrack, JustifyContent, Length, ObjectFit, Position, TextTransform,
+    },
     dom::{Document, Kind, NodeId},
     style_engine::{ListMarker, Style, compute_styles},
 };
@@ -666,7 +668,16 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             let specified = if content_only {
                 None
             } else {
-                resolve(style.width)
+                resolve(style.width).or_else(|| {
+                    if let Some(r) = style.aspect_ratio
+                        && r > 0.0
+                        && let Some(h) = resolve(style.height)
+                    {
+                        Some(h * r)
+                    } else {
+                        None
+                    }
+                })
             };
             let width = if let Some(width) = specified {
                 width
@@ -681,6 +692,16 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .map_or(0.0, |image| {
                         resolve(style.height).map_or(image.width as f32, |height| {
                             height * image.width as f32 / image.height as f32
+                        })
+                    })
+                    + padding
+                    + border
+            } else if node.name() == "svg" {
+                let inline_src = format!("__inline_svg__{id}");
+                (self.resolve_image)(&inline_src)
+                    .map_or(0.0, |image| {
+                        resolve(style.height).map_or(image.width as f32, |height| {
+                            height * image.width as f32 / (image.height.max(1) as f32)
                         })
                     })
                     + padding
@@ -1109,7 +1130,40 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             height: effective_height,
         })
     }
+}
 
+fn compute_object_fit_rect(
+    style: &Style,
+    box_rect: Rect,
+    image_width: u32,
+    image_height: u32,
+) -> (Rect, bool) {
+    if (style.object_fit == ObjectFit::Cover || style.object_fit == ObjectFit::Contain)
+        && image_width > 0
+        && image_height > 0
+        && box_rect.height > 0.0
+    {
+        let img_ratio = image_width as f32 / image_height as f32;
+        let box_ratio = box_rect.width / box_rect.height;
+        let (scaled_w, scaled_h) = if (style.object_fit == ObjectFit::Cover && box_ratio > img_ratio)
+            || (style.object_fit == ObjectFit::Contain && box_ratio <= img_ratio)
+        {
+            (box_rect.width, box_rect.width / img_ratio)
+        } else {
+            (box_rect.height * img_ratio, box_rect.height)
+        };
+        let scaled_x = box_rect.x + (box_rect.width - scaled_w) * 0.5;
+        let scaled_y = box_rect.y + (box_rect.height - scaled_h) * 0.5;
+        (
+            Rect::new(scaled_x, scaled_y, scaled_w, scaled_h),
+            style.object_fit == ObjectFit::Cover,
+        )
+    } else {
+        (box_rect, false)
+    }
+}
+
+impl<'a, T: TextMeasurer, R: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, R> {
     fn block(
         &mut self,
         id: NodeId,
@@ -1169,7 +1223,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .max(0.0)
                 })
         };
-        let specified_height = resolve_height(style.height);
+        let mut specified_height = resolve_height(style.height);
         let fixed_margins = left.unwrap_or_default() + right.unwrap_or_default();
         let remaining = (available - fixed_margins - pad_left - pad_right).max(1.0);
         let adjustment = if style.border_box {
@@ -1177,9 +1231,18 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         } else {
             0.0
         };
-        let specified_width = flex_width
+        let mut specified_width = flex_width
             .map(|width| width - pad_left - pad_right)
             .or_else(|| resolve(style.width).map(|value| value - adjustment));
+
+        if specified_width.is_none()
+            && let Some(h) = specified_height
+            && let Some(r) = style.aspect_ratio
+            && r > 0.0
+        {
+            specified_width = Some(h * r);
+        }
+
         let image_src = node
             .attr("src")
             .filter(|s| !s.trim().is_empty())
@@ -1188,13 +1251,18 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .and_then(|s| s.split(',').next().and_then(|p| p.split_whitespace().next()))
             })
             .or_else(|| node.attr("data-src"));
-        let image = (node.name() == "img")
-            .then(|| image_src.and_then(&self.resolve_image))
-            .flatten();
+        let inline_svg_src = (node.name() == "svg").then(|| format!("__inline_svg__{id}"));
+        let image = if node.name() == "img" {
+            image_src.and_then(&self.resolve_image)
+        } else if let Some(ref inline_src) = inline_svg_src {
+            (self.resolve_image)(inline_src)
+        } else {
+            None
+        };
         let auto_width = image.map_or(remaining, |image| {
             specified_height
                 .map_or(image.width as f32, |height| {
-                    height * image.width as f32 / image.height as f32
+                    height * image.width as f32 / (image.height.max(1) as f32)
                 })
                 .min(remaining)
         });
@@ -1207,6 +1275,15 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
             )
             .max(resolve(style.min_width).map_or(0.0, |value| value - adjustment))
             .clamp(1.0, 16_384.0);
+
+        if specified_height.is_none()
+            && let Some(r) = style.aspect_ratio
+            && r > 0.0
+            && (specified_width.is_some() || style.display.is_block())
+        {
+            specified_height = Some(width / r);
+        }
+
         let border_width = width + pad_left + pad_right;
         let auto = if flex_width.is_some() {
             0.0
@@ -1221,6 +1298,17 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 .entry(anchor.to_owned())
                 .or_insert(box_y.max(0.0));
         }
+        let shadow_index = if style.visible && let Some(shadow) = style.box_shadow {
+            let index = self.commands.len();
+            self.commands.push(Command::Fill {
+                rect: Rect::default(),
+                color: paint(shadow.color, style.opacity),
+                radius: 0.0,
+            });
+            Some((index, shadow))
+        } else {
+            None
+        };
         let has_rounded_border = style.visible
             && border > 0.0
             && style.border_color.alpha > 0.0
@@ -1289,13 +1377,25 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         };
         let (content_height, control_link, is_focused) = if node.name() == "img" {
             let height = if let Some(image) = image {
-                let height =
-                    specified_height.unwrap_or(width * image.height as f32 / image.width as f32);
+                let height = specified_height
+                    .unwrap_or(width * image.height as f32 / (image.width.max(1) as f32));
                 if style.visible {
-                    self.commands.push(Command::Image {
-                        rect: Rect::new(content_x, content_y, width, height),
-                        image: image.id,
-                    });
+                    let box_rect = Rect::new(content_x, content_y, width, height);
+                    let (image_rect, clip) =
+                        compute_object_fit_rect(&style, box_rect, image.width, image.height);
+                    if clip {
+                        self.commands.push(Command::PushClip { rect: box_rect });
+                        self.commands.push(Command::Image {
+                            rect: image_rect,
+                            image: image.id,
+                        });
+                        self.commands.push(Command::PopClip);
+                    } else {
+                        self.commands.push(Command::Image {
+                            rect: image_rect,
+                            image: image.id,
+                        });
+                    }
                 }
                 height
             } else {
@@ -1305,6 +1405,44 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                     .height
             };
             (height, None, false)
+        } else if node.name() == "svg" {
+            let inline_src = format!("__inline_svg__{id}");
+            let resolved = (self.resolve_image)(&inline_src);
+            if let Some(image) = resolved {
+                let height = specified_height
+                    .unwrap_or(width * image.height as f32 / (image.width.max(1) as f32));
+                if style.visible {
+                    let box_rect = Rect::new(content_x, content_y, width, height);
+                    let (image_rect, clip) =
+                        compute_object_fit_rect(&style, box_rect, image.width, image.height);
+                    if clip {
+                        self.commands.push(Command::PushClip { rect: box_rect });
+                        self.commands.push(Command::Image {
+                            rect: image_rect,
+                            image: image.id,
+                        });
+                        self.commands.push(Command::PopClip);
+                    } else {
+                        self.commands.push(Command::Image {
+                            rect: image_rect,
+                            image: image.id,
+                        });
+                    }
+                }
+                (height, None, false)
+            } else {
+                let height = self.children(
+                    id,
+                    content_x,
+                    content_y,
+                    ContainingBlock {
+                        width,
+                        height: specified_height,
+                    },
+                    href,
+                )?;
+                (height, None, false)
+            }
         } else if node.name() == "video" {
             let width = if style.width != Length::Auto {
                 width
@@ -1690,6 +1828,18 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         }
         let box_height = pad_top + used_height + pad_bottom;
         let rect = Rect::new(x, box_y, border_width, box_height);
+        if let Some((index, shadow)) = shadow_index {
+            self.commands[index] = Command::Fill {
+                rect: Rect::new(
+                    rect.x + shadow.offset_x - shadow.spread,
+                    rect.y + shadow.offset_y - shadow.spread,
+                    (rect.width + shadow.spread * 2.0).max(0.0),
+                    (rect.height + shadow.spread * 2.0).max(0.0),
+                ),
+                color: paint(shadow.color, style.opacity),
+                radius: (style.radius + shadow.spread).max(0.0),
+            };
+        }
         if let Some(index) = border_index {
             let max_r = (rect.width.min(rect.height) * 0.5).max(0.0);
             let r = style.radius.min(max_r);
@@ -2825,5 +2975,193 @@ mod tests {
             matches!(cmd, Command::Fill { color, radius, .. } if *color == Color::rgb(0x00ff00) && *radius == 6.0)
         });
         assert!(bg_cmd.is_some(), "Inner rounded background fill should be rendered");
+    }
+
+    #[test]
+    fn test_aspect_ratio_layout() {
+        // Width definite, height auto
+        let page = parse_html(
+            r#"<body style="margin:0"><div id="box1" style="width: 200px; aspect-ratio: 2/1"></div></body>"#,
+        )
+        .unwrap();
+        let result = layout(&page, 800.0, &mut FixedText, |_| None, None).unwrap();
+        assert_eq!(result.height, 100.0);
+
+        // Height definite, width auto
+        let page2 = parse_html(
+            r#"<body style="margin:0"><div id="box2" style="height: 100px; aspect-ratio: 2/1; background: #ff0000"></div></body>"#,
+        )
+        .unwrap();
+        let result2 = layout(&page2, 800.0, &mut FixedText, |_| None, None).unwrap();
+        let fill = result2
+            .display_list
+            .commands
+            .iter()
+            .find(|cmd| matches!(cmd, Command::Fill { color, .. } if *color == Color::rgb(0xff0000)))
+            .unwrap();
+        if let Command::Fill { rect, .. } = fill {
+            assert_eq!(rect.width, 200.0);
+            assert_eq!(rect.height, 100.0);
+        } else {
+            panic!("Expected Fill command");
+        }
+    }
+
+    #[test]
+    fn test_object_fit_cover_and_contain() {
+        let page = parse_html(
+            r#"<body style="margin:0">
+                <img id="img_cover" src="img1.png" style="width: 200px; height: 100px; object-fit: cover">
+                <img id="img_contain" src="img2.png" style="width: 200px; height: 100px; object-fit: contain">
+            </body>"#,
+        )
+        .unwrap();
+
+        let result = layout(
+            &page,
+            800.0,
+            &mut FixedText,
+            |src| {
+                if src == "img1.png" {
+                    // Intrinsic 100x100 (aspect ratio 1.0) inside box 200x100 (ratio 2.0)
+                    // Cover: width = 200, height = 200, centered at y = -50
+                    Some(ImageInfo {
+                        id: 1,
+                        width: 100,
+                        height: 100,
+                    })
+                } else if src == "img2.png" {
+                    // Intrinsic 100x100 (aspect ratio 1.0) inside box 200x100 (ratio 2.0)
+                    // Contain: height = 100, width = 100, centered at x = 50
+                    Some(ImageInfo {
+                        id: 2,
+                        width: 100,
+                        height: 100,
+                    })
+                } else {
+                    None
+                }
+            },
+            None,
+        )
+        .unwrap();
+
+        // Check cover clipping and image rect
+        let has_clip = result
+            .display_list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, Command::PushClip { rect } if rect.width == 200.0 && rect.height == 100.0));
+        assert!(has_clip, "Cover must push clip");
+
+        let cover_img = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Image { rect, image } if *image == 1 && rect.width == 200.0 && rect.height == 200.0 && rect.y == -50.0)
+        });
+        assert!(cover_img.is_some(), "Cover image rect must be scaled and centered");
+
+        // Check contain image rect (width = 100, height = 100, centered horizontally at x = 50)
+        let contain_img = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Image { rect, image } if *image == 2 && rect.width == 100.0 && rect.height == 100.0 && rect.x == 50.0)
+        });
+        assert!(contain_img.is_some(), "Contain image rect must be scaled and centered");
+    }
+
+    #[test]
+    fn test_box_shadow_rendering() {
+        let page = parse_html(
+            r#"<body style="margin:0">
+                <div id="target" style="width: 100px; height: 50px; border-radius: 4px; box-shadow: 10px 20px 0px 5px #ff0000; background: #00ff00"></div>
+            </body>"#,
+        )
+        .unwrap();
+
+        let result = layout(&page, 800.0, &mut FixedText, |_| None, None).unwrap();
+
+        // Shadow should be emitted with:
+        // x = 0 + 10 - 5 = 5
+        // y = 0 + 20 - 5 = 15
+        // width = 100 + 10 = 110
+        // height = 50 + 10 = 60
+        // radius = 4 + 5 = 9
+        // color = #ff0000
+        let shadow_cmd_idx = result.display_list.commands.iter().position(|cmd| {
+            matches!(cmd, Command::Fill { rect, color, radius } if *color == Color::rgb(0xff0000)
+                && rect.x == 5.0 && rect.y == 15.0 && rect.width == 110.0 && rect.height == 60.0 && *radius == 9.0)
+        });
+        assert!(shadow_cmd_idx.is_some(), "Box-shadow fill command must be rendered with correct geometry");
+
+        let bg_cmd_idx = result.display_list.commands.iter().position(|cmd| {
+            matches!(cmd, Command::Fill { color, .. } if *color == Color::rgb(0x00ff00))
+        });
+        assert!(bg_cmd_idx.is_some());
+
+        // Shadow must be rendered before background
+        assert!(shadow_cmd_idx.unwrap() < bg_cmd_idx.unwrap(), "Shadow must be painted before background");
+    }
+
+    #[test]
+    fn test_inline_svg_rendering() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                _style: TextStyle,
+                _width: f32,
+                _links: &[TextRange],
+            ) -> Result<display_list::TextMetrics, String> {
+                self.0.push(text.to_owned());
+                Ok(display_list::TextMetrics {
+                    layout: 0,
+                    width: 50.0,
+                    height: 16.0,
+                    links: Vec::new(),
+                })
+            }
+        }
+
+        let page = parse_html(
+            r#"<body style="margin:0">
+                <svg id="s1" width="120" height="60">
+                    <text>Should Not Duplicate Text</text>
+                </svg>
+            </body>"#,
+        )
+        .unwrap();
+
+        let s1 = page.element_by_id("s1").unwrap();
+        let expected_key = format!("__inline_svg__{s1}");
+
+        let mut measurer = TextCapture(Vec::new());
+        let result = layout(
+            &page,
+            800.0,
+            &mut measurer,
+            |src| {
+                if src == expected_key {
+                    Some(ImageInfo {
+                        id: 99,
+                        width: 120,
+                        height: 60,
+                    })
+                } else {
+                    None
+                }
+            },
+            None,
+        )
+        .unwrap();
+
+        // Must emit Command::Image for the SVG
+        let img_cmd = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Image { image: 99, rect } if rect.width == 120.0 && rect.height == 60.0)
+        });
+        assert!(img_cmd.is_some(), "Inline SVG must emit Command::Image when resolved");
+
+        // Must not duplicate text children
+        assert!(
+            !measurer.0.iter().any(|t| t.contains("Should Not Duplicate Text")),
+            "Inline SVG text children must not be rendered when image is resolved"
+        );
     }
 }

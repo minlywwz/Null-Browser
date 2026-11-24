@@ -161,12 +161,23 @@ impl Document {
         if selector.is_empty() || selector.len() > 512 {
             return Vec::new();
         }
+        let selectors: Vec<&str> = selector
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if selectors.is_empty() {
+            return Vec::new();
+        }
         let mut found = Vec::new();
         for id in self.tree_order() {
             if id == 0 || scope.is_some_and(|scope| scope == id || !descendant(self, scope, id)) {
                 continue;
             }
-            if crate::style_engine::node_matches(self, id, selector) {
+            if selectors
+                .iter()
+                .any(|sel| crate::style_engine::node_matches(self, id, sel))
+            {
                 found.push(id);
                 if !all || found.len() == 256 {
                     break;
@@ -298,7 +309,9 @@ impl Document {
         match action {
             "contains" => return contains,
             "add" if !contains => names.push(name),
-            "remove" => names.retain(|item| *item != name),
+            "add" => return false,
+            "remove" if contains => names.retain(|item| *item != name),
+            "remove" => return false,
             "toggle" if contains => names.retain(|item| *item != name),
             "toggle" => names.push(name),
             _ => return contains,
@@ -626,6 +639,86 @@ impl Document {
         }
         self.set_attr(node, "checked", String::new());
     }
+
+    pub fn inline_svg_elements(&self) -> Vec<NodeId> {
+        self.tree_order()
+            .filter(|&id| {
+                let node = &self.nodes[id];
+                if node.name() != "svg" || node.attr("hidden").is_some() {
+                    return false;
+                }
+                let mut parent = node.parent;
+                while let Some(pid) = parent {
+                    let ancestor = &self.nodes[pid];
+                    if is_inert(ancestor.name())
+                        || ancestor.name() == "head"
+                        || ancestor.attr("hidden").is_some()
+                    {
+                        return false;
+                    }
+                    parent = ancestor.parent;
+                }
+                true
+            })
+            .collect()
+    }
+
+    pub fn serialize_subtree_xml(&self, root: NodeId) -> String {
+        let mut out = String::new();
+        self.serialize_xml_node(root, root, &mut out);
+        out
+    }
+
+    fn serialize_xml_node(&self, id: NodeId, root: NodeId, out: &mut String) {
+        let Some(node) = self.nodes.get(id) else {
+            return;
+        };
+        match &node.kind {
+            Kind::Element { name, attributes } => {
+                let tag_name = fix_svg_tag_name(name);
+                out.push('<');
+                out.push_str(tag_name);
+
+                if id == root
+                    && name == "svg"
+                    && !attributes
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("xmlns"))
+                {
+                    out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+                }
+
+                for (key, val) in attributes {
+                    let attr_name = fix_svg_attr_name(key);
+                    out.push(' ');
+                    out.push_str(attr_name);
+                    out.push_str("=\"");
+                    escape_xml_attr_into(val, out);
+                    out.push('"');
+                }
+
+                if node.children.is_empty() {
+                    out.push_str(" />");
+                } else {
+                    out.push('>');
+                    for &child in &node.children {
+                        self.serialize_xml_node(child, root, out);
+                    }
+                    out.push_str("</");
+                    out.push_str(tag_name);
+                    out.push('>');
+                }
+            }
+            Kind::Text(text) => {
+                escape_xml_text_into(text, out);
+            }
+            _ => {
+                for &child in &node.children {
+                    self.serialize_xml_node(child, root, out);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) struct ScriptBlock {
@@ -710,6 +803,67 @@ fn descendant(document: &Document, ancestor: NodeId, node: NodeId) -> bool {
 
 pub(crate) fn is_inert(tag: &str) -> bool {
     matches!(tag, "template" | "iframe" | "object" | "embed")
+}
+
+fn fix_svg_tag_name(name: &str) -> &str {
+    match name {
+        "clippath" => "clipPath",
+        "lineargradient" => "linearGradient",
+        "radialgradient" => "radialGradient",
+        "fedropshadow" => "feDropShadow",
+        "fegaussianblur" => "feGaussianBlur",
+        "feoffset" => "feOffset",
+        "femerge" => "feMerge",
+        "femergenode" => "feMergeNode",
+        "feblend" => "feBlend",
+        "fecolormatrix" => "feColorMatrix",
+        "fecomposite" => "feComposite",
+        _ => name,
+    }
+}
+
+fn fix_svg_attr_name(name: &str) -> &str {
+    match name {
+        "viewbox" => "viewBox",
+        "preserveaspectratio" => "preserveAspectRatio",
+        "gradientunits" => "gradientUnits",
+        "gradienttransform" => "gradientTransform",
+        "patternunits" => "patternUnits",
+        "patterntransform" => "patternTransform",
+        "spreadmethod" => "spreadMethod",
+        "clippathunits" => "clipPathUnits",
+        "maskunits" => "maskUnits",
+        "maskcontentunits" => "maskContentUnits",
+        "textlength" => "textLength",
+        "lengthadjust" => "lengthAdjust",
+        "startoffset" => "startOffset",
+        "pathlength" => "pathLength",
+        "stddeviation" => "stdDeviation",
+        _ => name,
+    }
+}
+
+fn escape_xml_attr_into(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+}
+
+fn escape_xml_text_into(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -836,5 +990,56 @@ mod tests {
         assert!(doc.get_attr(r1, "checked").is_none());
         assert!(doc.get_attr(r2, "checked").is_some());
         assert!(doc.get_attr(r3, "checked").is_some());
+    }
+
+    #[test]
+    fn test_inline_svg_elements() {
+        let html = r#"
+            <div>
+                <svg id="s1" width="10" height="10"></svg>
+                <div hidden>
+                    <svg id="s2"></svg>
+                </div>
+                <svg id="s3" hidden></svg>
+                <template>
+                    <svg id="s4"></svg>
+                </template>
+                <svg id="s5" viewBox="0 0 20 20">
+                    <circle cx="10" cy="10" r="5" />
+                </svg>
+            </div>
+        "#;
+        let doc = parse_html(html).unwrap();
+        let svgs = doc.inline_svg_elements();
+        let s1 = doc.element_by_id("s1").unwrap();
+        let s5 = doc.element_by_id("s5").unwrap();
+        assert_eq!(svgs, vec![s1, s5]);
+    }
+
+    #[test]
+    fn test_serialize_subtree_xml() {
+        let html = r#"
+            <svg id="s1" viewBox="0 0 100 100" width="100" height="100">
+                <circle cx="50" cy="50" r="40" fill="red" />
+                <text x="10" y="20">Hello &amp; Welcome</text>
+            </svg>
+        "#;
+        let doc = parse_html(html).unwrap();
+        let s1 = doc.element_by_id("s1").unwrap();
+        let xml = doc.serialize_subtree_xml(s1);
+        assert!(xml.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(xml.contains("viewBox=\"0 0 100 100\""));
+        assert!(xml.contains("<circle"));
+        assert!(xml.contains("cx=\"50\""));
+        assert!(xml.contains("/>"));
+        assert!(xml.contains("<text x=\"10\" y=\"20\">Hello &amp; Welcome</text>"));
+        assert!(xml.ends_with("</svg>"));
+
+        // If xmlns already exists, don't duplicate it
+        let html2 = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><rect width="50" height="50"/></svg>"#;
+        let doc2 = parse_html(html2).unwrap();
+        let s2 = doc2.tree_order().find(|&id| doc2.nodes[id].name() == "svg").unwrap();
+        let xml2 = doc2.serialize_subtree_xml(s2);
+        assert_eq!(xml2.matches("xmlns=").count(), 1);
     }
 }

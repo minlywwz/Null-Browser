@@ -669,6 +669,27 @@ pub(crate) enum Declaration {
     TextTransform(TextTransform),
     LineHeight(Length),
     FlexWrap(bool),
+    AspectRatio(f32),
+    ObjectFit(ObjectFit),
+    BoxShadow(BoxShadow),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum ObjectFit {
+    #[default]
+    Fill,
+    Cover,
+    Contain,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -1708,6 +1729,15 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             "padding-right" => padding(value).map(|value| D::Padding(1, value)),
             "padding-bottom" => padding(value).map(|value| D::Padding(2, value)),
             "padding-left" => padding(value).map(|value| D::Padding(3, value)),
+            "aspect-ratio" => parse_aspect_ratio(value).map(D::AspectRatio),
+            "object-fit" => match value {
+                "fill" => Some(D::ObjectFit(ObjectFit::Fill)),
+                "cover" => Some(D::ObjectFit(ObjectFit::Cover)),
+                "contain" => Some(D::ObjectFit(ObjectFit::Contain)),
+                "none" => Some(D::ObjectFit(ObjectFit::None)),
+                _ => None,
+            },
+            "box-shadow" => parse_box_shadow(value).map(D::BoxShadow),
             _ => None,
         };
         expanded.extend(declaration);
@@ -1717,6 +1747,104 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
         }));
     }
     declarations
+}
+
+fn parse_aspect_ratio(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return Some(0.0);
+    }
+    let clean = if let Some(stripped) = value.strip_prefix("auto") {
+        stripped.trim()
+    } else if let Some(stripped) = value.strip_suffix("auto") {
+        stripped.trim()
+    } else {
+        value
+    };
+    if clean.is_empty() {
+        return Some(0.0);
+    }
+    if let Some((w_str, h_str)) = clean.split_once('/') {
+        let w = w_str.trim().parse::<f32>().ok()?;
+        let h = h_str.trim().parse::<f32>().ok()?;
+        if w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite() {
+            return Some(w / h);
+        }
+        return None;
+    }
+    let r = clean.parse::<f32>().ok()?;
+    if r > 0.0 && r.is_finite() {
+        Some(r)
+    } else {
+        None
+    }
+}
+
+fn parse_shadow_length(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if s == "0" {
+        return Some(0.0);
+    }
+    if let Some(px) = s.strip_suffix("px") {
+        return px.trim().parse::<f32>().ok();
+    }
+    if let Some(em) = s.strip_suffix("em").or_else(|| s.strip_suffix("rem")) {
+        return em.trim().parse::<f32>().ok().map(|v| v * 16.0);
+    }
+    s.parse::<f32>().ok()
+}
+
+pub(crate) fn parse_box_shadow(value: &str) -> Option<BoxShadow> {
+    let mut tokens: Vec<&str> = split_top_level(value, char::is_whitespace)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    if tokens.is_empty() || value == "none" {
+        return None;
+    }
+    tokens.retain(|&t| t != "inset");
+    if tokens.len() < 2 || tokens.len() > 5 {
+        return None;
+    }
+
+    let mut color_val = None;
+    let mut length_tokens = Vec::new();
+
+    if let Some(c) = color(tokens[0]) {
+        color_val = Some(c);
+        length_tokens.extend_from_slice(&tokens[1..]);
+    } else if let Some(c) = color(tokens[tokens.len() - 1]) {
+        color_val = Some(c);
+        length_tokens.extend_from_slice(&tokens[..tokens.len() - 1]);
+    } else {
+        length_tokens.extend_from_slice(&tokens[..]);
+    }
+
+    if length_tokens.len() < 2 || length_tokens.len() > 4 {
+        return None;
+    }
+
+    let offset_x = parse_shadow_length(length_tokens[0])?;
+    let offset_y = parse_shadow_length(length_tokens[1])?;
+    let blur = if length_tokens.len() > 2 {
+        parse_shadow_length(length_tokens[2])?
+    } else {
+        0.0
+    };
+    let spread = if length_tokens.len() > 3 {
+        parse_shadow_length(length_tokens[3])?
+    } else {
+        0.0
+    };
+    let color = color_val.unwrap_or(Color::rgb(0x000000));
+
+    Some(BoxShadow {
+        offset_x,
+        offset_y,
+        blur,
+        spread,
+        color,
+    })
 }
 
 #[cfg(test)]
@@ -2002,5 +2130,77 @@ mod tests {
 
         let bg_rgb = parse_background("rgb(10, 20, 30) none").unwrap();
         assert_eq!(bg_rgb, Color::rgb(0x0a141e));
+    }
+
+    #[test]
+    fn parses_aspect_ratio_object_fit_and_box_shadow() {
+        assert_eq!(parse_aspect_ratio("16 / 9"), Some(16.0 / 9.0));
+        assert_eq!(parse_aspect_ratio("16/9"), Some(16.0 / 9.0));
+        assert_eq!(parse_aspect_ratio("1 / 1"), Some(1.0));
+        assert_eq!(parse_aspect_ratio("4/3"), Some(4.0 / 3.0));
+        assert_eq!(parse_aspect_ratio("0.75"), Some(0.75));
+        assert_eq!(parse_aspect_ratio("auto"), Some(0.0));
+        assert_eq!(parse_aspect_ratio("auto 16/9"), Some(16.0 / 9.0));
+
+        let decls = parse_inline(
+            "aspect-ratio: 16/9; object-fit: cover; box-shadow: 2px 4px 6px 8px rgba(0, 0, 0, 0.5)",
+            &HashMap::new(),
+            &[],
+        );
+        let ar = decls.iter().find_map(|d| match d.value {
+            Declaration::AspectRatio(r) => Some(r),
+            _ => None,
+        });
+        let of = decls.iter().find_map(|d| match d.value {
+            Declaration::ObjectFit(fit) => Some(fit),
+            _ => None,
+        });
+        let bs = decls.iter().find_map(|d| match d.value {
+            Declaration::BoxShadow(s) => Some(s),
+            _ => None,
+        });
+        assert_eq!(ar, Some(16.0 / 9.0));
+        assert_eq!(of, Some(ObjectFit::Cover));
+        assert_eq!(
+            bs,
+            Some(BoxShadow {
+                offset_x: 2.0,
+                offset_y: 4.0,
+                blur: 6.0,
+                spread: 8.0,
+                color: Color {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.5
+                }
+            })
+        );
+
+        let bs_simple = parse_box_shadow("5px 10px #ff0000").unwrap();
+        assert_eq!(
+            bs_simple,
+            BoxShadow {
+                offset_x: 5.0,
+                offset_y: 10.0,
+                blur: 0.0,
+                spread: 0.0,
+                color: Color::rgb(0xff0000),
+            }
+        );
+
+        let bs_color_first = parse_box_shadow("blue 1px 2px 3px").unwrap();
+        assert_eq!(
+            bs_color_first,
+            BoxShadow {
+                offset_x: 1.0,
+                offset_y: 2.0,
+                blur: 3.0,
+                spread: 0.0,
+                color: Color::rgb(0x0000ff),
+            }
+        );
+
+        assert!(parse_box_shadow("none").is_none());
     }
 }

@@ -4,8 +4,8 @@
   <img src="https://img.shields.io/badge/Platform-Windows%2011%20x64-0078d4?style=for-the-badge&logo=windows11&logoColor=white" alt="Platform" />
   <img src="https://img.shields.io/badge/Rust-2024%20Edition-black?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/C%2B%2B-20%20%2F%20Direct3D%2011-00599c?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++" />
-  <img src="https://img.shields.io/badge/Tests-82%20passed-2ea44f?style=for-the-badge" alt="Tests" />
-  <img src="https://img.shields.io/badge/Code-17.3k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
+  <img src="https://img.shields.io/badge/Tests-103%20passed-2ea44f?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/Code-18.8k%2B%20LOC-blueviolet?style=for-the-badge" alt="Lines of Code" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
 </p>
 
@@ -33,7 +33,10 @@ An independent, lightweight web browser engine built from scratch for Windows 11
 * **Multi-Tab Interface**: Tab strip with adaptive width, tab lifecycle, per-tab history, scroll preservation, and shortcuts (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab`, `Ctrl+1..9`).
 * **HTML5 Audio & Video**: Native playback for `<video>` and `<audio>` powered by Windows Media Foundation (`IMFSourceReader`) with direct D3D11 frame presentation, interactive play/pause controls overlay, and timeline scrubbing.
 * **Interactive Forms**: `<form>`, `<input>` (text, search, password, submit, checkbox, radio), `<button>`, and `<textarea>`. Supports typing with Win32 `WM_CHAR`, focus outline, text caret, and query string submission.
-* **Modern Web APIs**: JavaScript QuickJS engine with `fetch()` (Promises, `json()`, `text()`), `localStorage`, `sessionStorage`, and `console.log`.
+* **Modern Web APIs & DOM**: JavaScript QuickJS engine with `fetch()` (Promises, `json()`, `text()`), `localStorage`, `sessionStorage`, `console.log`, `document.querySelector` / `querySelectorAll`, `element.classList` (`add`, `remove`, `toggle`, `contains`), `getAttribute` / `setAttribute`, and timers (`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`).
+* **Vector Graphics & Inline SVG**: Full inline `<svg>` DOM subtree serialization and vector rasterization via `resvg` directly into Direct2D composited image layers.
+* **Modern CSS & Layout**: Flexbox (wrapping, row/column, gap), CSS Grid tracks, `aspect-ratio`, `object-fit: cover / contain`, `box-shadow`, HSL/HSLA color models, background shorthands, and sibling/child/descendant combinators (`+`, `>`, ` `).
+* **In-Memory HTTP Asset Cache**: Thread-safe LRU asset caching with stale entry eviction for stylesheets, images, scripts, and web fonts, enabling instant page navigation.
 * **Web Typography**: `@font-face` rule parsing, dynamic font resource downloading, and Windows DirectWrite in-memory font registration via `AddFontMemResourceEx`.
 * **Security Sandbox**: Untrusted web pages execute inside a Windows AppContainer with strict Job Object memory and process limits.
 * **GPU Compositing**: Direct3D 11 flip-model swapchain, DirectWrite text rasterization, and Motion Engine borderless fullscreen transitions.

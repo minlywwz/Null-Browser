@@ -255,6 +255,29 @@ impl Worker {
             .ok_or("No document is open.")?
             .run(viewport)?;
         let failure = self.session.as_ref().unwrap().failure();
+
+        let inline_svgs: Vec<(usize, String)> = {
+            let document = self.session.as_ref().unwrap().document();
+            document
+                .inline_svg_elements()
+                .into_iter()
+                .map(|id| (id, document.serialize_subtree_xml(id)))
+                .collect()
+        };
+
+        let mut remaining = MAX_PIXEL_BYTES.saturating_sub(self.images.iter().map(|img| img.bgra.len()).sum());
+        for (svg_id, xml) in inline_svgs {
+            let key = format!("__inline_svg__{svg_id}");
+            if !self.image_ids.contains_key(&key) {
+                if let Some(pixels) = decode_svg(xml.as_bytes(), remaining) {
+                    remaining = remaining.saturating_sub(pixels.bgra.len());
+                    let image_id = self.images.len() as u32;
+                    self.image_ids.insert(key, image_id);
+                    self.images.push(pixels);
+                }
+            }
+        }
+
         let document = self.session.as_ref().unwrap().document();
         let mut recorder = RemoteText { input, output };
         let page = web_engine::layout_with_stylesheets(
@@ -637,6 +660,70 @@ mod tests {
                 assert_eq!(query, "?query=typed+text&opt=1");
             }
             _ => panic!("Expected Reply::Submitted"),
+        }
+    }
+
+    #[test]
+    fn test_inline_svg_discovery_and_registration() {
+        let mut worker = Worker::default();
+        let html = r#"
+            <body style="margin:0">
+                <svg id="s1" width="16" height="16" viewBox="0 0 16 16">
+                    <rect width="16" height="16" fill="blue" />
+                </svg>
+            </body>
+        "#;
+        let mut mock_input = MockBrowserInput { buffer: Vec::new() };
+        let mut dummy_output = Vec::<u8>::new();
+        let reply = worker
+            .handle(
+                Request::Open(html.into()),
+                &mut mock_input,
+                &mut dummy_output,
+            )
+            .unwrap();
+        assert!(matches!(reply, Reply::Resources(_)));
+
+        let svg_id = {
+            let session = worker.session.as_ref().unwrap();
+            session.document().element_by_id("s1").unwrap()
+        };
+        let expected_key = format!("__inline_svg__{svg_id}");
+
+        let page_reply = worker
+            .handle(
+                Request::Layout {
+                    viewport: Viewport {
+                        width: 800.0,
+                        height: 600.0,
+                    },
+                    assets: None,
+                },
+                &mut mock_input,
+                &mut dummy_output,
+            )
+            .unwrap();
+
+        match page_reply {
+            Reply::Page(snapshot) => {
+                // Ensure image was registered
+                assert!(worker.image_ids.contains_key(&expected_key));
+                let img_id = worker.image_ids[&expected_key];
+                assert!((img_id as usize) < worker.images.len());
+
+                // Ensure Snapshot received images
+                let images = snapshot.images.expect("images should be included on initial layout");
+                assert!((img_id as usize) < images.len());
+                let pixels = &images[img_id as usize];
+                assert_eq!((pixels.width, pixels.height), (16, 16));
+
+                // Display list should contain an Image command for the SVG
+                let has_img_cmd = snapshot.page.display_list.commands.iter().any(|cmd| {
+                    matches!(cmd, display_list::Command::Image { image, .. } if *image == img_id)
+                });
+                assert!(has_img_cmd, "DisplayList must contain Command::Image for the inline SVG");
+            }
+            _ => panic!("Expected Reply::Page"),
         }
     }
 }
