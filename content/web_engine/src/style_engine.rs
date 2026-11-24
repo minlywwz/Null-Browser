@@ -5,9 +5,9 @@ use display_list::{Color, FontFamily, TextAlign, TextStyle};
 use crate::{
     Viewport,
     css_parser::{
-        AlignItems, Compound, Declaration, Display, GridColumns, JustifyContent, Length,
-        MAX_STYLESHEET_BYTES, Position, Rule, Selector, WhiteSpace, parse_inline, parse_selector,
-        parse_stylesheet_with_fonts,
+        AlignItems, AttrMatch, Compound, Declaration, Display, GridColumns, JustifyContent, Length,
+        MAX_STYLESHEET_BYTES, Position, Rule, Selector, TextTransform, WhiteSpace, parse_inline,
+        parse_selector, parse_stylesheet_with_fonts,
     },
     dom::{Document, Kind, Node, NodeId},
 };
@@ -50,6 +50,9 @@ pub(crate) struct Style {
     pub(crate) padding: [Length; 4],
     pub(crate) radius: f32,
     pub(crate) white_space: WhiteSpace,
+    pub(crate) text_transform: TextTransform,
+    pub(crate) line_height: Option<Length>,
+    pub(crate) flex_wrap: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +104,9 @@ impl Default for Style {
             padding: [Length::Px(0.0); 4],
             radius: 0.0,
             white_space: WhiteSpace::Normal,
+            text_transform: TextTransform::None,
+            line_height: None,
+            flex_wrap: false,
         }
     }
 }
@@ -127,6 +133,8 @@ impl Style {
             white_space: parent.white_space,
             visible: parent.visible,
             table_columns: parent.table_columns,
+            text_transform: parent.text_transform,
+            line_height: parent.line_height,
             ..Self::default()
         };
         let tag = node.name();
@@ -422,6 +430,11 @@ impl Style {
             Declaration::Padding(side, value) => self.padding[side] = value,
             Declaration::Radius(value) => self.radius = value,
             Declaration::WhiteSpace(value) => self.white_space = value,
+            Declaration::TextTransform(value) => self.text_transform = value,
+            Declaration::LineHeight(value) => {
+                self.line_height = (value != Length::Auto).then_some(value)
+            }
+            Declaration::FlexWrap(value) => self.flex_wrap = value,
         }
     }
 }
@@ -473,9 +486,18 @@ fn matches_compound(document: &Document, id: NodeId, part: &Compound) -> bool {
         && (!part.first_child || siblings().and_then(|mut elements| elements.next()) == Some(id))
         && (!part.last_child
             || siblings().and_then(|mut elements| elements.next_back()) == Some(id))
-        && part.attributes.iter().all(|(key, value)| {
-            node.attr(key)
-                .is_some_and(|attribute| value.as_deref().is_none_or(|value| value == attribute))
+        && (!part.empty || node.children.is_empty())
+        && (!part.disabled || node.attr("disabled").is_some())
+        && (!part.checked || node.attr("checked").is_some())
+        && part.attributes.iter().all(|(key, matcher)| {
+            node.attr(key).is_some_and(|attribute| match matcher {
+                AttrMatch::Exists => true,
+                AttrMatch::Exact(v) => attribute == v,
+                AttrMatch::Includes(v) => attribute.split_ascii_whitespace().any(|w| w == v),
+                AttrMatch::Prefix(v) => attribute.starts_with(v),
+                AttrMatch::Suffix(v) => attribute.ends_with(v),
+                AttrMatch::Substring(v) => attribute.contains(v),
+            })
         })
         && (!part.not_dir_rtl || !direction_rtl(node))
         && (!part.dir_rtl || direction_rtl(node))

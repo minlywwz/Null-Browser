@@ -6,7 +6,7 @@ use display_list::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    css_parser::{AlignItems, Display, GridTrack, JustifyContent, Length, Position},
+    css_parser::{AlignItems, Display, GridTrack, JustifyContent, Length, Position, TextTransform},
     dom::{Document, Kind, NodeId},
     style_engine::{ListMarker, Style, compute_styles},
 };
@@ -258,6 +258,32 @@ struct InlineText<'a> {
     space: Option<(Option<&'a str>, Style)>,
 }
 
+fn transform_text(text: &str, transform: TextTransform) -> std::borrow::Cow<'_, str> {
+    match transform {
+        TextTransform::None => std::borrow::Cow::Borrowed(text),
+        TextTransform::Uppercase => std::borrow::Cow::Owned(text.to_uppercase()),
+        TextTransform::Lowercase => std::borrow::Cow::Owned(text.to_lowercase()),
+        TextTransform::Capitalize => {
+            let mut res = String::with_capacity(text.len());
+            let mut capitalize_next = true;
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    capitalize_next = true;
+                    res.push(ch);
+                } else if capitalize_next {
+                    for upper in ch.to_uppercase() {
+                        res.push(upper);
+                    }
+                    capitalize_next = false;
+                } else {
+                    res.push(ch);
+                }
+            }
+            std::borrow::Cow::Owned(res)
+        }
+    }
+}
+
 impl<'a> InlineText<'a> {
     fn new() -> Self {
         Self {
@@ -320,7 +346,8 @@ impl<'a> InlineText<'a> {
     }
 
     fn append(&mut self, text: &str, href: Option<&'a str>, style: Style) -> Result<(), String> {
-        let mut characters = text.chars().peekable();
+        let transformed = transform_text(text, style.text_transform);
+        let mut characters = transformed.chars().peekable();
         while let Some(character) = characters.next() {
             let character = match character {
                 '\r' => {
@@ -744,7 +771,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
     fn flex_row(
         &mut self,
         id: NodeId,
-        mut x: f32,
+        x: f32,
         y: f32,
         containing: ContainingBlock,
         href: Option<&'a str>,
@@ -802,77 +829,147 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 max_width,
             });
         }
-        let spacing = self.styles[id].gap[1]
+        let row_spacing = self.styles[id].gap[0]
+            .resolve(
+                containing.height.unwrap_or(self.viewport.height),
+                self.viewport,
+                self.styles[id].text.size,
+            )
+            .unwrap_or(0.0)
+            .max(0.0);
+        let col_spacing = self.styles[id].gap[1]
             .resolve(containing.width, self.viewport, self.styles[id].text.size)
             .unwrap_or(0.0)
             .max(0.0);
-        let spacing_total = spacing * items.len().saturating_sub(1) as f32;
-        let remaining = containing.width
-            - items
-                .iter()
-                .map(|item| item.width + item.margin)
-                .sum::<f32>()
-            - spacing_total;
-        let weight = |item: &FlexItem| {
-            let style = self.styles[item.id];
-            if remaining >= 0.0 {
-                style.flex_grow
-            } else {
-                style.flex_shrink * item.width
+
+        let mut lines: Vec<Vec<FlexItem>> = Vec::new();
+        if self.styles[id].flex_wrap && !items.is_empty() {
+            let mut current_line: Vec<FlexItem> = Vec::new();
+            let mut current_width = 0.0;
+            for item in items {
+                let item_width = item.width + item.margin;
+                if !current_line.is_empty()
+                    && current_width + col_spacing + item_width > containing.width
+                {
+                    lines.push(std::mem::take(&mut current_line));
+                    current_width = item_width;
+                    current_line.push(item);
+                } else {
+                    if !current_line.is_empty() {
+                        current_width += col_spacing;
+                    }
+                    current_width += item_width;
+                    current_line.push(item);
+                }
             }
-        };
-        let total: f32 = items.iter().map(weight).sum();
-        if total > 0.0 {
-            for item in &mut items {
-                item.width = (item.width + remaining * weight(item) / total)
-                    .clamp(item.min_width, item.max_width);
+            if !current_line.is_empty() {
+                lines.push(current_line);
             }
+        } else {
+            lines.push(items);
         }
-        let remaining = (containing.width
-            - items
-                .iter()
-                .map(|item| item.width + item.margin)
-                .sum::<f32>())
-        .max(0.0);
-        let between = match self.styles[id].justify_content {
-            JustifyContent::Start => 0.0,
-            JustifyContent::Center => {
-                x += remaining / 2.0;
-                0.0
+
+        let mut current_y = y;
+        let mut total_height: f32 = 0.0;
+        let num_lines = lines.len();
+        for (line_idx, mut line_items) in lines.into_iter().enumerate() {
+            if line_items.is_empty() {
+                continue;
             }
-            JustifyContent::End => {
-                x += remaining;
-                0.0
+            let spacing_total = col_spacing * line_items.len().saturating_sub(1) as f32;
+            let remaining = containing.width
+                - line_items
+                    .iter()
+                    .map(|item| item.width + item.margin)
+                    .sum::<f32>()
+                - spacing_total;
+            let weight = |item: &FlexItem| {
+                let style = self.styles[item.id];
+                if remaining >= 0.0 {
+                    style.flex_grow
+                } else {
+                    style.flex_shrink * item.width
+                }
+            };
+            let total: f32 = line_items.iter().map(weight).sum();
+            if total > 0.0 {
+                for item in &mut line_items {
+                    item.width = (item.width + remaining * weight(item) / total)
+                        .clamp(item.min_width, item.max_width);
+                }
             }
-            JustifyContent::SpaceBetween => remaining / items.len().saturating_sub(1).max(1) as f32,
-        };
-        let mut height: f32 = 0.0;
-        for item in items {
-            let command_from = self.commands.len();
-            let link_from = self.links.len();
-            let item_height = if let Kind::Text(text) = &self.document.nodes[item.id].kind {
-                let mut inline = InlineText::new();
-                inline.append(text, href, self.styles[item.id])?;
-                self.flush(&mut inline, self.styles[item.id], x, y, item.width)?
+            let remaining = (containing.width
+                - line_items
+                    .iter()
+                    .map(|item| item.width + item.margin)
+                    .sum::<f32>()
+                - spacing_total)
+                .max(0.0);
+            let mut line_x = origin_x;
+            let between = match self.styles[id].justify_content {
+                JustifyContent::Start => 0.0,
+                JustifyContent::Center => {
+                    line_x += remaining / 2.0;
+                    0.0
+                }
+                JustifyContent::End => {
+                    line_x += remaining;
+                    0.0
+                }
+                JustifyContent::SpaceBetween => {
+                    remaining / line_items.len().saturating_sub(1).max(1) as f32
+                }
+            };
+            let mut line_height: f32 = 0.0;
+            for item in line_items {
+                let command_from = self.commands.len();
+                let link_from = self.links.len();
+                let item_height = if let Kind::Text(text) = &self.document.nodes[item.id].kind {
+                    let mut inline = InlineText::new();
+                    inline.append(text, href, self.styles[item.id])?;
+                    self.flush(
+                        &mut inline,
+                        self.styles[item.id],
+                        line_x,
+                        current_y,
+                        item.width,
+                    )?
                     .height
-            } else {
-                self.block(item.id, x, y, containing, Some(item.width), href)?
-            };
-            let shift = match (self.styles[id].align, containing.height) {
-                (AlignItems::Center, Some(available)) => ((available - item_height) / 2.0).max(0.0),
-                (AlignItems::End, Some(available)) => (available - item_height).max(0.0),
-                _ => 0.0,
-            };
-            if shift > 0.0 {
-                self.shift(command_from, link_from, shift, y, item_height);
+                } else {
+                    self.block(
+                        item.id,
+                        line_x,
+                        current_y,
+                        containing,
+                        Some(item.width),
+                        href,
+                    )?
+                };
+                let shift = match (self.styles[id].align, containing.height) {
+                    (AlignItems::Center, Some(available)) if num_lines == 1 => {
+                        ((available - item_height) / 2.0).max(0.0)
+                    }
+                    (AlignItems::End, Some(available)) if num_lines == 1 => {
+                        (available - item_height).max(0.0)
+                    }
+                    _ => 0.0,
+                };
+                if shift > 0.0 {
+                    self.shift(command_from, link_from, shift, current_y, item_height);
+                }
+                line_height = line_height.max(item_height + shift);
+                line_x += item.width + item.margin + between + col_spacing;
             }
-            height = height.max(item_height + shift);
-            x += item.width + item.margin + between + spacing;
+            current_y += line_height;
+            if line_idx + 1 < num_lines {
+                current_y += row_spacing;
+            }
+            total_height = current_y - y;
         }
         for child in absolute {
             self.place_absolute(child, origin_x, y, y, containing, href)?;
         }
-        Ok(height)
+        Ok(total_height)
     }
 
     fn place_absolute(
@@ -987,8 +1084,15 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 });
             }
         }
+        let resolved_lh = style
+            .line_height
+            .and_then(|lh| lh.resolve(style.text.size, self.viewport, style.text.size));
+        let effective_height = match resolved_lh {
+            Some(lh) if lh > 0.0 => text.height.max(lh),
+            _ => text.height,
+        };
         self.commands.push(Command::Text {
-            bounds: Rect::new(x, y, width.max(text.width), text.height),
+            bounds: Rect::new(x, y, width.max(text.width), effective_height),
             color: paint(style.color, if style.visible { style.opacity } else { 0.0 }),
             layout: text.layout,
         });
@@ -1002,7 +1106,7 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         *inline = InlineText::new();
         Ok(TextFlow {
             width: text.width + trailing_space,
-            height: text.height,
+            height: effective_height,
         })
     }
 
@@ -1109,6 +1213,22 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
                 .entry(anchor.to_owned())
                 .or_insert(box_y.max(0.0));
         }
+        let has_rounded_border = style.visible
+            && border > 0.0
+            && style.border_color.alpha > 0.0
+            && style.radius > 0.0
+            && style.background.alpha > 0.0;
+        let border_index = if has_rounded_border {
+            let index = self.commands.len();
+            self.commands.push(Command::Fill {
+                rect: Rect::default(),
+                color: paint(style.border_color, style.opacity),
+                radius: style.radius,
+            });
+            Some(index)
+        } else {
+            None
+        };
         let background = if style.visible && style.background.alpha > 0.0 && self.canvas != Some(id)
         {
             let index = self.commands.len();
@@ -1562,14 +1682,34 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         }
         let box_height = pad_top + used_height + pad_bottom;
         let rect = Rect::new(x, box_y, border_width, box_height);
-        if let Some(index) = background {
+        if let Some(index) = border_index {
             self.commands[index] = Command::Fill {
                 rect,
-                color: paint(style.background, style.opacity),
+                color: paint(style.border_color, style.opacity),
                 radius: style.radius,
             };
         }
-        if style.visible && border > 0.0 && style.border_color.alpha > 0.0 {
+        if let Some(index) = background {
+            let (bg_rect, bg_radius) = if border_index.is_some() {
+                (
+                    Rect::new(
+                        rect.x + border,
+                        rect.y + border,
+                        (rect.width - border * 2.0).max(0.0),
+                        (rect.height - border * 2.0).max(0.0),
+                    ),
+                    (style.radius - border).max(0.0),
+                )
+            } else {
+                (rect, style.radius)
+            };
+            self.commands[index] = Command::Fill {
+                rect: bg_rect,
+                color: paint(style.background, style.opacity),
+                radius: bg_radius,
+            };
+        }
+        if style.visible && border > 0.0 && style.border_color.alpha > 0.0 && border_index.is_none() {
             let color = paint(style.border_color, style.opacity);
             let bottom = rect.y + rect.height - border;
             let right = rect.x + rect.width - border;
@@ -2594,5 +2734,84 @@ mod tests {
         assert!(measurer.0.contains(&"▶".to_string()));
         assert!(measurer.0.contains(&"❚❚".to_string()));
         assert!(measurer.0.contains(&"🔊".to_string()));
+    }
+
+    #[test]
+    fn test_text_transform_layout() {
+        struct TextCapture(Vec<String>);
+        impl TextMeasurer for TextCapture {
+            fn measure(
+                &mut self,
+                text: &str,
+                style: TextStyle,
+                width: f32,
+                links: &[TextRange],
+            ) -> Result<TextMetrics, String> {
+                self.0.push(text.to_owned());
+                FixedText.measure(text, style, width, links)
+            }
+        }
+
+        let page = parse_html(
+            r#"
+            <p id="t1" style="text-transform: uppercase">hello world</p>
+            <p id="t2" style="text-transform: capitalize">foo bar baz</p>
+            "#,
+        )
+        .unwrap();
+
+        let mut measurer = TextCapture(Vec::new());
+        let _ = layout(&page, 800.0, &mut measurer, |_| None, None).unwrap();
+
+        assert!(measurer.0.contains(&"HELLO WORLD".to_string()));
+        assert!(measurer.0.contains(&"Foo Bar Baz".to_string()));
+    }
+
+    #[test]
+    fn test_flex_wrap_multiline() {
+        let page = parse_html(
+            r#"
+            <div id="container" style="display: flex; flex-wrap: wrap; width: 250px; gap: 10px">
+                <div style="width: 120px; height: 50px">Item 1</div>
+                <div style="width: 120px; height: 50px">Item 2</div>
+                <div style="width: 120px; height: 50px">Item 3</div>
+            </div>
+            "#,
+        )
+        .unwrap();
+
+        let mut measurer = FixedText;
+        let result = layout(&page, 500.0, &mut measurer, |_| None, None).unwrap();
+        // Item 1 and Item 2 take 120 + 10 + 120 = 250px (fits line 1).
+        // Item 3 overflows 250px and wraps to line 2.
+        // Total height should be at least 50 (line 1) + 10 (gap) + 50 (line 2) = 110px.
+        assert!(result.height >= 110.0, "Expected multiline flex height >= 110, got {}", result.height);
+    }
+
+    #[test]
+    fn test_rounded_borders_rendering() {
+        let page = parse_html(
+            r#"
+            <div id="btn" style="width: 100px; height: 40px; border-radius: 8px; border: 2px solid #ff0000; background: #00ff00">
+                Test
+            </div>
+            "#,
+        )
+        .unwrap();
+
+        let mut measurer = FixedText;
+        let result = layout(&page, 500.0, &mut measurer, |_| None, None).unwrap();
+
+        // Outer border fill with radius 8 and color red
+        let border_cmd = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Fill { color, radius, .. } if *color == Color::rgb(0xff0000) && *radius == 8.0)
+        });
+        assert!(border_cmd.is_some(), "Outer rounded border fill should be rendered");
+
+        // Inner background fill with radius 6 (8 - 2) and color green
+        let bg_cmd = result.display_list.commands.iter().find(|cmd| {
+            matches!(cmd, Command::Fill { color, radius, .. } if *color == Color::rgb(0x00ff00) && *radius == 6.0)
+        });
+        assert!(bg_cmd.is_some(), "Inner rounded background fill should be rendered");
     }
 }

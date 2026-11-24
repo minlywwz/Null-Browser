@@ -666,6 +666,28 @@ pub(crate) enum Declaration {
     Padding(usize, Length),
     Radius(f32),
     WhiteSpace(WhiteSpace),
+    TextTransform(TextTransform),
+    LineHeight(Length),
+    FlexWrap(bool),
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) enum TextTransform {
+    #[default]
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum AttrMatch {
+    Exists,
+    Exact(String),
+    Includes(String),
+    Prefix(String),
+    Suffix(String),
+    Substring(String),
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -701,7 +723,10 @@ pub(crate) struct Compound {
     pub(crate) root: bool,
     pub(crate) first_child: bool,
     pub(crate) last_child: bool,
-    pub(crate) attributes: Vec<(String, Option<String>)>,
+    pub(crate) empty: bool,
+    pub(crate) disabled: bool,
+    pub(crate) checked: bool,
+    pub(crate) attributes: Vec<(String, AttrMatch)>,
     pub(crate) not_dir_rtl: bool,
     pub(crate) dir_rtl: bool,
 }
@@ -988,6 +1013,9 @@ pub(crate) fn parse_selector(input: &str) -> Option<Selector> {
                 + usize::from(part.root)
                 + usize::from(part.first_child)
                 + usize::from(part.last_child)
+                + usize::from(part.empty)
+                + usize::from(part.disabled)
+                + usize::from(part.checked)
                 + usize::from(part.not_dir_rtl)
                 + usize::from(part.dir_rtl);
             selector.specificity.2 += usize::from(part.tag.is_some());
@@ -1028,20 +1056,46 @@ fn parse_compound(input: &str) -> Option<Compound> {
         }
         if let Some(attribute) = rest.strip_prefix('[') {
             let end = attribute.find(']')?;
-            let (key, value) = attribute[..end].split_once('=').map_or(
-                (attribute[..end].trim(), None),
-                |(key, value)| {
-                    (
-                        key.trim(),
-                        Some(value.trim().trim_matches(['\'', '"']).to_owned()),
-                    )
-                },
-            );
+            let raw = attribute[..end].trim();
+            let (key, matcher) = if let Some((k, v)) = raw.split_once("~=") {
+                (
+                    k.trim(),
+                    AttrMatch::Includes(v.trim().trim_matches(['\'', '"']).to_owned()),
+                )
+            } else if let Some((k, v)) = raw.split_once("^=") {
+                (
+                    k.trim(),
+                    AttrMatch::Prefix(v.trim().trim_matches(['\'', '"']).to_owned()),
+                )
+            } else if let Some((k, v)) = raw.split_once("$=") {
+                (
+                    k.trim(),
+                    AttrMatch::Suffix(v.trim().trim_matches(['\'', '"']).to_owned()),
+                )
+            } else if let Some((k, v)) = raw.split_once("*=") {
+                (
+                    k.trim(),
+                    AttrMatch::Substring(v.trim().trim_matches(['\'', '"']).to_owned()),
+                )
+            } else if let Some((k, v)) = raw.split_once('=') {
+                (
+                    k.trim(),
+                    AttrMatch::Exact(v.trim().trim_matches(['\'', '"']).to_owned()),
+                )
+            } else {
+                (raw, AttrMatch::Exists)
+            };
             if !identifier(key) {
                 return None;
             }
-            part.attributes.push((key.to_ascii_lowercase(), value));
+            part.attributes.push((key.to_ascii_lowercase(), matcher));
             rest = &attribute[end + 1..];
+            continue;
+        }
+        if rest.starts_with("::") {
+            let after_colons = &rest[2..];
+            let name_end = mark(after_colons);
+            rest = &after_colons[name_end..];
             continue;
         }
         let Some(marker) = rest.as_bytes().first() else {
@@ -1058,6 +1112,10 @@ fn parse_compound(input: &str) -> Option<Compound> {
             b':' if name == "root" => part.root = true,
             b':' if name == "first-child" => part.first_child = true,
             b':' if name == "last-child" => part.last_child = true,
+            b':' if name == "empty" => part.empty = true,
+            b':' if name == "disabled" => part.disabled = true,
+            b':' if name == "checked" => part.checked = true,
+            b':' if matches!(name, "hover" | "focus" | "focus-visible" | "active" | "visited") => {}
             _ => return None,
         }
         rest = tail;
@@ -1265,6 +1323,11 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             "flex-direction" if matches!(value, "row" | "column") => {
                 Some(D::FlexColumn(value == "column"))
             }
+            "flex-wrap" => match value {
+                "wrap" | "wrap-reverse" => Some(D::FlexWrap(true)),
+                "nowrap" => Some(D::FlexWrap(false)),
+                _ => None,
+            },
             "flex-grow" => bounded(value, 0.0, 1024.0).map(D::FlexGrow),
             "flex-shrink" => bounded(value, 0.0, 1024.0).map(D::FlexShrink),
             "flex" => {
@@ -1409,6 +1472,22 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
                 "pre-line" => Some(D::WhiteSpace(WhiteSpace::PreLine)),
                 _ => None,
             },
+            "text-transform" => match value {
+                "uppercase" => Some(D::TextTransform(TextTransform::Uppercase)),
+                "lowercase" => Some(D::TextTransform(TextTransform::Lowercase)),
+                "capitalize" => Some(D::TextTransform(TextTransform::Capitalize)),
+                "none" => Some(D::TextTransform(TextTransform::None)),
+                _ => None,
+            },
+            "line-height" => {
+                if let Some(num) = bounded(value, 0.5, 10.0) {
+                    Some(D::LineHeight(Length::Em(num)))
+                } else if value == "normal" {
+                    Some(D::LineHeight(Length::Auto))
+                } else {
+                    length(value).filter(|l| *l != Length::Auto).map(D::LineHeight)
+                }
+            }
             "width" => length(value).map(D::Width),
             "max-width" => length(value).map(D::MaxWidth),
             "height" => length(value).map(D::Height),
@@ -1416,7 +1495,12 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             "box-sizing" if matches!(value, "border-box" | "content-box") => {
                 Some(D::BorderBox(value == "border-box"))
             }
-            "overflow" if matches!(value, "hidden" | "clip" | "visible") => {
+            "overflow" | "overflow-x" | "overflow-y"
+                if matches!(
+                    value,
+                    "hidden" | "clip" | "visible" | "auto" | "scroll"
+                ) =>
+            {
                 Some(D::OverflowClip(value != "visible"))
             }
             "visibility" if matches!(value, "visible" | "hidden" | "collapse") => {
@@ -1439,7 +1523,19 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
             {
                 Some(D::ClipHidden)
             }
-            "border-radius" => px(value, 128.0).map(D::Radius),
+            "border-radius" => {
+                if value == "50%" || value == "100%" {
+                    Some(D::Radius(9999.0))
+                } else if let Some(px_val) = value.strip_suffix("px") {
+                    px_val.parse::<f32>().ok().map(|r| D::Radius(r.clamp(0.0, 9999.0)))
+                } else if let Some(em_val) = value.strip_suffix("em").or_else(|| value.strip_suffix("rem")) {
+                    em_val.parse::<f32>().ok().map(|r| D::Radius((r * 16.0).clamp(0.0, 9999.0)))
+                } else if value == "0" {
+                    Some(D::Radius(0.0))
+                } else {
+                    None
+                }
+            }
             "margin" => {
                 if let Some(sides) = box_sides(value, length) {
                     expanded.extend(
@@ -1682,5 +1778,67 @@ mod tests {
         assert_eq!(display, Some(Display::InlineBlock));
         assert!(!Display::InlineBlock.is_block());
         assert!(Display::InlineBlock.is_inline_block());
+    }
+
+    #[test]
+    fn parses_attribute_selectors_and_pseudos() {
+        let sel_exact = parse_selector("a[target='_blank']").unwrap();
+        assert_eq!(
+            sel_exact.parts[0].attributes,
+            vec![("target".to_string(), AttrMatch::Exact("_blank".to_string()))]
+        );
+
+        let sel_prefix = parse_selector("[href^='https://']").unwrap();
+        assert_eq!(
+            sel_prefix.parts[0].attributes,
+            vec![("href".to_string(), AttrMatch::Prefix("https://".to_string()))]
+        );
+
+        let sel_substring = parse_selector("div[class*='card-item']").unwrap();
+        assert_eq!(
+            sel_substring.parts[0].attributes,
+            vec![(
+                "class".to_string(),
+                AttrMatch::Substring("card-item".to_string())
+            )]
+        );
+
+        let sel_pseudo = parse_selector("button:disabled").unwrap();
+        assert!(sel_pseudo.parts[0].disabled);
+
+        let sel_hover = parse_selector("a:hover").unwrap();
+        assert_eq!(sel_hover.parts[0].tag, Some("a".to_string()));
+
+        let sel_before = parse_selector("div::before").unwrap();
+        assert_eq!(sel_before.parts[0].tag, Some("div".to_string()));
+    }
+
+    #[test]
+    fn parses_text_transform_line_height_and_pill_radius() {
+        let decls = parse_inline(
+            "text-transform: uppercase; line-height: 1.5; flex-wrap: wrap; border-radius: 50%",
+            &HashMap::new(),
+            &[],
+        );
+        let tt = decls.iter().find_map(|d| match d.value {
+            Declaration::TextTransform(t) => Some(t),
+            _ => None,
+        });
+        let lh = decls.iter().find_map(|d| match d.value {
+            Declaration::LineHeight(l) => Some(l),
+            _ => None,
+        });
+        let fw = decls.iter().find_map(|d| match d.value {
+            Declaration::FlexWrap(w) => Some(w),
+            _ => None,
+        });
+        let r = decls.iter().find_map(|d| match d.value {
+            Declaration::Radius(r) => Some(r),
+            _ => None,
+        });
+        assert_eq!(tt, Some(TextTransform::Uppercase));
+        assert_eq!(lh, Some(Length::Em(1.5)));
+        assert_eq!(fw, Some(true));
+        assert_eq!(r, Some(9999.0));
     }
 }
