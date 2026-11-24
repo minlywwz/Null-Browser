@@ -261,9 +261,9 @@ fn fetch_assets(network: &NetworkStack, document: &Url, resources: Resources) ->
     if requests.is_empty() {
         return Assets::default();
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(12);
     thread::scope(|scope| {
-        let lanes = requests.len().min(4);
+        let lanes = requests.len().min(8);
         let mut workers = Vec::new();
         for lane in 0..lanes {
             let requests = &requests;

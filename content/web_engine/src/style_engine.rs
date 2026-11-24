@@ -5,9 +5,9 @@ use display_list::{Color, FontFamily, TextAlign, TextStyle};
 use crate::{
     Viewport,
     css_parser::{
-        AlignItems, AttrMatch, Compound, Declaration, Display, GridColumns, JustifyContent, Length,
-        MAX_STYLESHEET_BYTES, Position, Rule, Selector, TextTransform, WhiteSpace, parse_inline,
-        parse_selector, parse_stylesheet_with_fonts,
+        AlignItems, AttrMatch, Combinator, Compound, Declaration, Display, GridColumns,
+        JustifyContent, Length, MAX_STYLESHEET_BYTES, Position, Rule, Selector, TextTransform,
+        WhiteSpace, parse_inline, parse_selector, parse_stylesheet_with_fonts,
     },
     dom::{Document, Kind, Node, NodeId},
 };
@@ -325,6 +325,22 @@ impl Style {
                     Length::Px(40.0)
                 };
             }
+            "svg" => {
+                style.display = Display::InlineBlock;
+                let size = |attribute| {
+                    node.attr(attribute)
+                        .and_then(|value| value.trim().trim_end_matches("px").parse::<u32>().ok())
+                        .map_or(Length::Auto, |value| Length::Px(value.min(16_384) as f32))
+                };
+                let w = size("width");
+                let h = size("height");
+                if w != Length::Auto {
+                    style.width = w;
+                }
+                if h != Length::Auto {
+                    style.height = h;
+                }
+            }
             // These elements are deliberately inert in the supported subset.
             "head" | "title" | "style" | "script" | "meta" | "base" | "link" | "template"
             | "iframe" | "object" | "embed" => {
@@ -519,23 +535,15 @@ fn direction_rtl(node: &Node) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("rtl"))
 }
 
-fn match_segment(
-    document: &Document,
-    selector: &Selector,
-    start: usize,
-    end: usize,
-    id: NodeId,
-) -> Option<NodeId> {
-    let mut node = id;
-    for part in (start..=end).rev() {
-        if !matches_compound(document, node, &selector.parts[part]) {
-            return None;
-        }
-        if part != start {
-            node = document.nodes[node].parent?;
-        }
-    }
-    Some(node)
+fn previous_element_sibling(document: &Document, id: NodeId) -> Option<NodeId> {
+    let parent = document.nodes[id].parent?;
+    let children = &document.nodes[parent].children;
+    let idx = children.iter().position(|&child| child == id)?;
+    children[..idx]
+        .iter()
+        .rev()
+        .copied()
+        .find(|&sibling| matches!(document.nodes[sibling].kind, Kind::Element { .. }))
 }
 
 pub(crate) fn node_matches(document: &Document, id: NodeId, selector: &str) -> bool {
@@ -543,32 +551,63 @@ pub(crate) fn node_matches(document: &Document, id: NodeId, selector: &str) -> b
 }
 
 fn matches_selector(document: &Document, id: NodeId, selector: &Selector) -> bool {
-    let mut end = selector.parts.len() - 1;
-    let mut candidate = Some(id);
-    let mut first = true;
-    loop {
-        let start = (0..end)
-            .rev()
-            .find(|i| !selector.child[*i])
-            .map_or(0, |i| i + 1);
-        let mut match_start = None;
-        while let Some(node) = candidate {
-            match_start = match_segment(document, selector, start, end, node);
-            if first || match_start.is_some() {
-                break;
-            }
-            candidate = document.nodes[node].parent;
-        }
-        let Some(node) = match_start else {
-            return false;
-        };
-        if start == 0 {
-            return true;
-        }
-        candidate = document.nodes[node].parent;
-        first = false;
-        end = start - 1;
+    let last = selector.parts.len() - 1;
+    if !matches_compound(document, id, &selector.parts[last]) {
+        return false;
     }
+    if selector.parts.len() == 1 {
+        return true;
+    }
+
+    fn match_step(
+        document: &Document,
+        current: NodeId,
+        selector: &Selector,
+        rel_idx: usize,
+    ) -> bool {
+        let comb = selector.relation[rel_idx];
+        let target_part = &selector.parts[rel_idx];
+        match comb {
+            Combinator::Adjacent => {
+                let Some(prev) = previous_element_sibling(document, current) else {
+                    return false;
+                };
+                if !matches_compound(document, prev, target_part) {
+                    return false;
+                }
+                if rel_idx == 0 {
+                    return true;
+                }
+                match_step(document, prev, selector, rel_idx - 1)
+            }
+            Combinator::Child => {
+                let Some(parent) = document.nodes[current].parent else {
+                    return false;
+                };
+                if !matches_compound(document, parent, target_part) {
+                    return false;
+                }
+                if rel_idx == 0 {
+                    return true;
+                }
+                match_step(document, parent, selector, rel_idx - 1)
+            }
+            Combinator::Descendant => {
+                let mut ancestor = document.nodes[current].parent;
+                while let Some(node) = ancestor {
+                    if matches_compound(document, node, target_part) {
+                        if rel_idx == 0 || match_step(document, node, selector, rel_idx - 1) {
+                            return true;
+                        }
+                    }
+                    ancestor = document.nodes[node].parent;
+                }
+                false
+            }
+        }
+    }
+
+    match_step(document, id, selector, selector.relation.len() - 1)
 }
 
 pub(crate) fn compute_styles(
@@ -623,4 +662,47 @@ pub(crate) fn compute_styles(
         styles[id] = style;
     }
     Ok(styles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_html;
+
+    #[test]
+    fn matches_adjacent_sibling_combinator() {
+        let html = r#"
+        <div id="root">
+            <h2>Heading</h2>
+            <p id="first-p">Paragraph immediately after heading</p>
+            <p id="second-p">Second paragraph</p>
+        </div>
+        "#;
+        let doc = parse_html(html).unwrap();
+        let first_p = doc.element_by_id("first-p").unwrap();
+        let second_p = doc.element_by_id("second-p").unwrap();
+
+        assert!(node_matches(&doc, first_p, "h2 + p"));
+        assert!(!node_matches(&doc, second_p, "h2 + p"));
+    }
+
+    #[test]
+    fn svg_element_gets_inline_block_and_attributes() {
+        let html = r#"<svg width="24" height="24"></svg>"#;
+        let doc = parse_html(html).unwrap();
+        let svg = doc.tree_order().find(|&id| doc.nodes[id].name() == "svg").unwrap();
+        let styles = compute_styles(
+            &doc,
+            Viewport {
+                width: 800.0,
+                height: 600.0,
+            },
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(styles[svg].display, Display::InlineBlock);
+        assert_eq!(styles[svg].width, Length::Px(24.0));
+        assert_eq!(styles[svg].height, Length::Px(24.0));
+    }
 }

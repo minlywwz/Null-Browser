@@ -9,7 +9,7 @@ const MAX_DEPTH: usize = 128;
 const MAX_ATTRIBUTES: usize = 64;
 
 enum Token {
-    Start(String, Vec<(String, String)>),
+    Start(String, Vec<(String, String)>, bool),
     End(String),
     Text(String),
     StreamMarker(StreamMarker),
@@ -129,8 +129,14 @@ impl<'a> Tokenizer<'a> {
                 self.at += 1;
                 let name = self.name();
                 let mut attributes = Vec::new();
+                let mut self_closing = false;
                 loop {
                     self.skip_space();
+                    if self.remaining().starts_with("/>") {
+                        self.at += 2;
+                        self_closing = true;
+                        break;
+                    }
                     match self.input.as_bytes().get(self.at) {
                         Some(b'>') => {
                             self.at += 1;
@@ -177,7 +183,7 @@ impl<'a> Tokenizer<'a> {
                 if matches!(name.as_str(), "script" | "style" | "title" | "textarea") {
                     self.raw = Some(name.clone());
                 }
-                return Ok(Some(Token::Start(name, attributes)));
+                return Ok(Some(Token::Start(name, attributes, self_closing)));
             }
             let end = remaining[usize::from(remaining.starts_with('<'))..]
                 .find('<')
@@ -328,13 +334,15 @@ pub fn parse_html(input: &str) -> Result<Document, String> {
             return Err("The HTML file exceeds the node limit.".into());
         }
         let id = document.nodes.len();
+        let mut self_closing_element = false;
         let kind = match token {
             Token::StreamMarker(marker) => Kind::StreamMarker(marker),
             Token::End(name) => {
                 close_open_element(&document, &mut stack, &name);
                 continue;
             }
-            Token::Start(name, attributes) => {
+            Token::Start(name, attributes, self_closing) => {
+                self_closing_element = self_closing;
                 if matches!(
                     name.as_str(),
                     "p" | "div"
@@ -444,7 +452,8 @@ pub fn parse_html(input: &str) -> Result<Document, String> {
         };
         let parent = *stack.last().unwrap();
         document.nodes[parent].children.push(id);
-        let open = matches!(&kind, Kind::Element { name, .. } if !is_void(name));
+        let open =
+            !self_closing_element && matches!(&kind, Kind::Element { name, .. } if !is_void(name));
         document.nodes.push(Node {
             kind,
             children: Vec::new(),
@@ -557,5 +566,30 @@ mod tests {
     #[test]
     fn rejects_deep_documents_without_recursing() {
         assert!(parse_html(&"<div>".repeat(MAX_DEPTH)).is_err());
+    }
+
+    #[test]
+    fn handles_self_closing_svg_tags() {
+        let html = r#"
+        <svg viewBox="0 0 24 24">
+            <path d="M1 1" />
+            <path d="M2 2" />
+            <circle cx="5" cy="5" r="5"/>
+        </svg>
+        <p>After SVG</p>
+        "#;
+        let doc = parse_html(html).unwrap();
+        let svg = doc.tree_order().find(|&id| doc.nodes[id].name() == "svg").unwrap();
+        // SVG children elements should be 3 (path, path, circle), NOT nested paths
+        let svg_children: Vec<_> = doc.nodes[svg]
+            .children
+            .iter()
+            .filter(|&&c| matches!(doc.nodes[c].kind, Kind::Element { .. }))
+            .map(|&c| doc.nodes[c].name())
+            .collect();
+        assert_eq!(svg_children, vec!["path", "path", "circle"]);
+        // And paragraph should be outside SVG
+        let p = doc.tree_order().find(|&id| doc.nodes[id].name() == "p").unwrap();
+        assert_ne!(doc.nodes[p].parent, Some(svg));
     }
 }

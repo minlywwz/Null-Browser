@@ -125,6 +125,12 @@ impl Document {
                 parent = ancestor.parent;
             }
             node.attr("src")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    node.attr("srcset")
+                        .and_then(|s| s.split(',').next().and_then(|p| p.split_whitespace().next()))
+                })
+                .or_else(|| node.attr("data-src"))
         })
     }
 

@@ -84,9 +84,9 @@ fn extract_font_url(value: &str) -> Option<String> {
     None
 }
 
-const MAX_RULES: usize = 8192;
-const MAX_CUSTOM_PROPERTIES: usize = 8192;
-pub(crate) const MAX_STYLESHEET_BYTES: usize = 768 * 1024;
+const MAX_RULES: usize = 16384;
+const MAX_CUSTOM_PROPERTIES: usize = 16384;
+pub(crate) const MAX_STYLESHEET_BYTES: usize = 4 * 1024 * 1024;
 
 fn custom_properties(source: &str) -> HashMap<String, String> {
     let bytes = source.as_bytes();
@@ -731,10 +731,17 @@ pub(crate) struct Compound {
     pub(crate) dir_rtl: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Combinator {
+    Descendant,
+    Child,
+    Adjacent,
+}
+
 pub(crate) struct Selector {
     pub(crate) parts: Vec<Compound>,
-    // child[i] describes the relationship between parts i and i + 1.
-    pub(crate) child: Vec<bool>,
+    // relation[i] describes the relationship between parts i and i + 1.
+    pub(crate) relation: Vec<Combinator>,
     specificity: (usize, usize, usize),
 }
 
@@ -991,41 +998,72 @@ pub(crate) fn parse_selector(input: &str) -> Option<Selector> {
     }
     let mut selector = Selector {
         parts: Vec::new(),
-        child: Vec::new(),
+        relation: Vec::new(),
         specificity: (0, 0, 0),
     };
-    for (index, group) in split_top_level(input, |character| character == '>').enumerate() {
-        if group.trim().is_empty() {
+
+    let mut rest = input.trim();
+    let mut next_combinator = None;
+
+    while !rest.is_empty() {
+        if selector.parts.len() >= 8 {
             return None;
         }
-        for (offset, token) in split_top_level(group, char::is_whitespace)
-            .filter(|token| !token.is_empty())
-            .enumerate()
-        {
-            if selector.parts.len() == 8 {
-                return None;
+        let mut in_bracket = false;
+        let mut end = rest.len();
+        for (i, b) in rest.bytes().enumerate() {
+            if b == b'[' {
+                in_bracket = true;
+            } else if b == b']' {
+                in_bracket = false;
+            } else if !in_bracket && (b == b'>' || b == b'+' || (b as char).is_ascii_whitespace()) {
+                end = i;
+                break;
             }
-            let part = parse_compound(token)?;
-            selector.specificity.0 += part.ids.len();
-            selector.specificity.1 += part.classes.len()
-                + part.attributes.len()
-                + usize::from(part.link)
-                + usize::from(part.root)
-                + usize::from(part.first_child)
-                + usize::from(part.last_child)
-                + usize::from(part.empty)
-                + usize::from(part.disabled)
-                + usize::from(part.checked)
-                + usize::from(part.not_dir_rtl)
-                + usize::from(part.dir_rtl);
-            selector.specificity.2 += usize::from(part.tag.is_some());
-            if !selector.parts.is_empty() {
-                selector.child.push(index != 0 && offset == 0);
-            }
-            selector.parts.push(part);
+        }
+        let compound_str = &rest[..end];
+        if compound_str.is_empty() {
+            return None;
+        }
+        let part = parse_compound(compound_str)?;
+        selector.specificity.0 += part.ids.len();
+        selector.specificity.1 += part.classes.len()
+            + part.attributes.len()
+            + usize::from(part.link)
+            + usize::from(part.root)
+            + usize::from(part.first_child)
+            + usize::from(part.last_child)
+            + usize::from(part.empty)
+            + usize::from(part.disabled)
+            + usize::from(part.checked)
+            + usize::from(part.not_dir_rtl)
+            + usize::from(part.dir_rtl);
+        selector.specificity.2 += usize::from(part.tag.is_some());
+
+        if let Some(comb) = next_combinator.take() {
+            selector.relation.push(comb);
+        }
+
+        selector.parts.push(part);
+        rest = rest[end..].trim_start();
+
+        if rest.is_empty() {
+            break;
+        }
+
+        if let Some(after) = rest.strip_prefix('>') {
+            next_combinator = Some(Combinator::Child);
+            rest = after.trim_start();
+        } else if let Some(after) = rest.strip_prefix('+') {
+            next_combinator = Some(Combinator::Adjacent);
+            rest = after.trim_start();
+        } else {
+            next_combinator = Some(Combinator::Descendant);
         }
     }
-    (!selector.parts.is_empty()).then_some(selector)
+
+    (!selector.parts.is_empty() && selector.relation.len() == selector.parts.len() - 1)
+        .then_some(selector)
 }
 
 fn parse_compound(input: &str) -> Option<Compound> {
@@ -1203,6 +1241,30 @@ fn border(value: &str) -> Option<(f32, Color)> {
     Some((width.unwrap_or(1.0), paint.unwrap_or(Color::rgb(0x151923))))
 }
 
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s <= 0.0 {
+        return (l, l, l);
+    }
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_norm = ((h % 360.0) + 360.0) % 360.0;
+    let h_prime = h_norm / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    (
+        (r1 + m).clamp(0.0, 1.0),
+        (g1 + m).clamp(0.0, 1.0),
+        (b1 + m).clamp(0.0, 1.0),
+    )
+}
+
 fn color(value: &str) -> Option<Color> {
     if let Some(hex) = value.strip_prefix('#') {
         let hex = u32::from_str_radix(hex, 16).ok()?;
@@ -1252,6 +1314,45 @@ fn color(value: &str) -> Option<Color> {
             alpha,
         });
     }
+    if let Some(args) = value
+        .strip_prefix("hsl(")
+        .or_else(|| value.strip_prefix("hsla("))
+        .and_then(|args| args.strip_suffix(')'))
+    {
+        let mut parts = args
+            .split(|c: char| matches!(c, ',' | '/') || c.is_ascii_whitespace())
+            .filter(|part| !part.is_empty());
+        let h_str = parts.next()?;
+        let h = h_str
+            .strip_suffix("deg")
+            .unwrap_or(h_str)
+            .parse::<f32>()
+            .ok()?;
+        let s = parts
+            .next()?
+            .strip_suffix('%')
+            .and_then(|v| bounded(v, 0.0, 100.0))
+            .map(|v| v / 100.0)?;
+        let l = parts
+            .next()?
+            .strip_suffix('%')
+            .and_then(|v| bounded(v, 0.0, 100.0))
+            .map(|v| v / 100.0)?;
+        let alpha = match parts.next() {
+            Some(value) => value.strip_suffix('%').map_or_else(
+                || bounded(value, 0.0, 1.0),
+                |value| bounded(value, 0.0, 100.0).map(|value| value / 100.0),
+            )?,
+            None => 1.0,
+        };
+        let (red, green, blue) = hsl_to_rgb(h, s, l);
+        return parts.next().is_none().then_some(Color {
+            red,
+            green,
+            blue,
+            alpha,
+        });
+    }
     Some(match value {
         "transparent" => Color::TRANSPARENT,
         "black" => Color::rgb(0x000000),
@@ -1260,6 +1361,8 @@ fn color(value: &str) -> Option<Color> {
         "green" => Color::rgb(0x008000),
         "blue" => Color::rgb(0x0000ff),
         "gray" | "grey" => Color::rgb(0x808080),
+        "lightgray" | "lightgrey" => Color::rgb(0xd3d3d3),
+        "darkgray" | "darkgrey" => Color::rgb(0xa9a9a9),
         "yellow" => Color::rgb(0xffff00),
         "navy" => Color::rgb(0x000080),
         "silver" => Color::rgb(0xc0c0c0),
@@ -1267,8 +1370,44 @@ fn color(value: &str) -> Option<Color> {
         "purple" => Color::rgb(0x800080),
         "rebeccapurple" => Color::rgb(0x663399),
         "teal" => Color::rgb(0x008080),
+        "cyan" | "aqua" => Color::rgb(0x00ffff),
+        "magenta" | "fuchsia" => Color::rgb(0xff00ff),
+        "pink" => Color::rgb(0xffc0cb),
+        "brown" => Color::rgb(0xa52a2a),
+        "gold" => Color::rgb(0xffd700),
+        "maroon" => Color::rgb(0x800000),
+        "olive" => Color::rgb(0x808000),
+        "lime" => Color::rgb(0x00ff00),
         _ => return None,
     })
+}
+
+fn parse_background(value: &str) -> Option<Color> {
+    if let Some(col) = color(value) {
+        return Some(col);
+    }
+    if let Some(start) = value.find("rgb(").or_else(|| value.find("rgba(")) {
+        let paren_pos = value[start..].find('(')?;
+        if let Some(end) = matching_paren(value.as_bytes(), start + paren_pos) {
+            if let Some(col) = color(&value[start..=end]) {
+                return Some(col);
+            }
+        }
+    }
+    if let Some(start) = value.find("hsl(").or_else(|| value.find("hsla(")) {
+        let paren_pos = value[start..].find('(')?;
+        if let Some(end) = matching_paren(value.as_bytes(), start + paren_pos) {
+            if let Some(col) = color(&value[start..=end]) {
+                return Some(col);
+            }
+        }
+    }
+    for part in value.split_ascii_whitespace() {
+        if let Some(col) = color(part) {
+            return Some(col);
+        }
+    }
+    None
 }
 
 fn box_sides<T: Copy>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<[T; 4]> {
@@ -1406,7 +1545,8 @@ fn parse_declarations(source: &str, custom_fonts: &[FontFace]) -> Vec<Declared> 
                 _ => None,
             },
             "color" => color(value).map(D::Color),
-            "background-color" | "background" => color(value).map(D::Background),
+            "background-color" => color(value).map(D::Background),
+            "background" => parse_background(value).map(D::Background),
             "font-size" => length(value)
                 .filter(|value| *value != Length::Auto)
                 .map(D::FontSize),
@@ -1840,5 +1980,27 @@ mod tests {
         assert_eq!(lh, Some(Length::Em(1.5)));
         assert_eq!(fw, Some(true));
         assert_eq!(r, Some(9999.0));
+    }
+
+    #[test]
+    fn parses_combinators_hsl_and_background_shorthand() {
+        let sel = parse_selector("h2 + p").unwrap();
+        assert_eq!(sel.parts.len(), 2);
+        assert_eq!(sel.relation, vec![Combinator::Adjacent]);
+
+        let sel_chain = parse_selector("div > h2 + p.lead").unwrap();
+        assert_eq!(sel_chain.parts.len(), 3);
+        assert_eq!(sel_chain.relation, vec![Combinator::Child, Combinator::Adjacent]);
+
+        let col_hsl = color("hsl(120, 100%, 50%)").unwrap();
+        assert!((col_hsl.green - 1.0).abs() < 0.01);
+        assert!(col_hsl.red < 0.01);
+        assert!(col_hsl.blue < 0.01);
+
+        let bg_shorthand = parse_background("#ffffff url('bg.png') no-repeat top right").unwrap();
+        assert_eq!(bg_shorthand, Color::rgb(0xffffff));
+
+        let bg_rgb = parse_background("rgb(10, 20, 30) none").unwrap();
+        assert_eq!(bg_rgb, Color::rgb(0x0a141e));
     }
 }

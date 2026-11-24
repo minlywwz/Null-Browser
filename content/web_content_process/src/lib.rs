@@ -23,13 +23,13 @@ use windows_sys::Win32::{
 use protocol::Text;
 pub use protocol::{Assets, Pixels, Probe, Reply, Request, Resources, Snapshot, receive, transmit};
 
-pub const MAX_STYLESHEETS: usize = 8;
-pub const MAX_IMAGES: usize = 16;
-pub const MAX_SCRIPTS: usize = 24;
-pub const MAX_FONTS: usize = 16;
+pub const MAX_STYLESHEETS: usize = 32;
+pub const MAX_IMAGES: usize = 64;
+pub const MAX_SCRIPTS: usize = 32;
+pub const MAX_FONTS: usize = 24;
 const MAX_REFERENCE_BYTES: usize = 4096;
 const MAX_DATA_IMAGE_BYTES: usize = 512 * 1024;
-pub const MAX_PIXEL_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_PIXEL_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn serve() -> Result<(), String> {
     if !is_app_container().map_err(|error| error.to_string())? {

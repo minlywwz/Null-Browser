@@ -15,11 +15,11 @@ use reqwest::{
 pub use url::Url;
 
 pub const MAX_URL_LENGTH: usize = 8 * 1024;
-pub const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_STYLESHEET_BYTES: usize = 256 * 1024;
-pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
-pub const MAX_FONT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_STYLESHEET_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SCRIPT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_FONT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 6;
 
 pub fn address(input: &str) -> Result<Url, String> {

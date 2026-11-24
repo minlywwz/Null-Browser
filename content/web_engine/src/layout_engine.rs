@@ -1180,8 +1180,16 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         let specified_width = flex_width
             .map(|width| width - pad_left - pad_right)
             .or_else(|| resolve(style.width).map(|value| value - adjustment));
+        let image_src = node
+            .attr("src")
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                node.attr("srcset")
+                    .and_then(|s| s.split(',').next().and_then(|p| p.split_whitespace().next()))
+            })
+            .or_else(|| node.attr("data-src"));
         let image = (node.name() == "img")
-            .then(|| node.attr("src").and_then(&self.resolve_image))
+            .then(|| image_src.and_then(&self.resolve_image))
             .flatten();
         let auto_width = image.map_or(remaining, |image| {
             specified_height
@@ -1683,25 +1691,29 @@ impl<'a, T: TextMeasurer, I: Fn(&str) -> Option<ImageInfo>> Layout<'a, T, I> {
         let box_height = pad_top + used_height + pad_bottom;
         let rect = Rect::new(x, box_y, border_width, box_height);
         if let Some(index) = border_index {
+            let max_r = (rect.width.min(rect.height) * 0.5).max(0.0);
+            let r = style.radius.min(max_r);
             self.commands[index] = Command::Fill {
                 rect,
                 color: paint(style.border_color, style.opacity),
-                radius: style.radius,
+                radius: r,
             };
         }
         if let Some(index) = background {
             let (bg_rect, bg_radius) = if border_index.is_some() {
-                (
-                    Rect::new(
-                        rect.x + border,
-                        rect.y + border,
-                        (rect.width - border * 2.0).max(0.0),
-                        (rect.height - border * 2.0).max(0.0),
-                    ),
-                    (style.radius - border).max(0.0),
-                )
+                let inner_rect = Rect::new(
+                    rect.x + border,
+                    rect.y + border,
+                    (rect.width - border * 2.0).max(0.0),
+                    (rect.height - border * 2.0).max(0.0),
+                );
+                let max_r = (inner_rect.width.min(inner_rect.height) * 0.5).max(0.0);
+                let r = (style.radius - border).clamp(0.0, max_r);
+                (inner_rect, r)
             } else {
-                (rect, style.radius)
+                let max_r = (rect.width.min(rect.height) * 0.5).max(0.0);
+                let r = style.radius.min(max_r);
+                (rect, r)
             };
             self.commands[index] = Command::Fill {
                 rect: bg_rect,

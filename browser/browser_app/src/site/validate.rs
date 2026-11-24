@@ -61,7 +61,7 @@ pub(super) fn prepare_snapshot(
         let valid = match command {
             Command::PushClip { rect } => {
                 clips += 1;
-                clips <= 128 && rect_valid(*rect)
+                clips <= 512 && rect_valid(*rect)
             }
             Command::PopClip if clips > 0 => {
                 clips -= 1;
@@ -72,7 +72,7 @@ pub(super) fn prepare_snapshot(
                 rect,
                 color,
                 radius,
-            } => rect_valid(*rect) && color_valid(*color) && (0.0..=128.0).contains(radius),
+            } => rect_valid(*rect) && color_valid(*color) && (0.0..=10_000.0).contains(radius),
             Command::Text {
                 bounds,
                 color,
